@@ -1,0 +1,34 @@
+#pragma once
+
+// The few things the GUI needs from the operating system. Implemented per platform in
+// platform_win32.cpp and platform_posix.cpp. All strings are UTF-8.
+
+#include <optional>
+#include <string>
+
+namespace otgui {
+
+struct FileFilter {
+    const char* description;  // e.g. "OpenTax files"
+    const char* pattern;      // e.g. "*.obk"
+};
+
+// Native file dialogs. Return nullopt when cancelled or unavailable (the UI then falls
+// back to a typed path).
+std::optional<std::string> openFileDialog(const char* title, FileFilter filter);
+std::optional<std::string> saveFileDialog(const char* title, FileFilter filter, const char* defaultExtension,
+                                          const std::string& suggestedName);
+bool nativeFileDialogsAvailable();
+
+// Opens a local file with the user's default application (e.g. a PDF viewer).
+// Returns false when unsupported or when the launch failed.
+bool openWithDefaultApp(const std::string& path);
+
+// Per-user settings directory (created on demand), e.g. %APPDATA%\OpenTax.
+std::string configDirectory();
+
+// Candidate UI font files, best first.
+const char* const* preferredFonts();      // null-terminated list
+const char* const* preferredBoldFonts();  // null-terminated list
+
+}  // namespace otgui
