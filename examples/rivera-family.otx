@@ -1,0 +1,11 @@
+OPENTAX 1
+INFO	status=mfj	street=41 Elm Street	city=Springfield	state=IL	zip=62701
+TAXPAYER	first=Jordan	last=Rivera	dob=1987-03-14
+SPOUSE	first=Casey	last=Rivera	dob=1988-11-02
+ADJUSTMENTS	studentloan=1800.00
+DEPENDENT	first=Mia	last=Rivera	dob=2017-06-01	care=4000.00
+DEPENDENT	first=Leo	last=Rivera	dob=2021-09-12	care=6500.00
+W2	employer=Northwind	wages=78000.00	fedwh=6400.00	sswages=78000.00	sswh=4836.00	medwages=78000.00	medwh=1131.00	retplan=yes	state=IL	statewh=3100.00	overtime=4200.00
+W2	owner=spouse	employer=Contoso Cafe	wages=31000.00	fedwh=1500.00	sswages=31000.00	sswh=1922.00	medwages=31000.00	medwh=449.50	sstips=6000.00	tips=6000.00
+1099INT	payer=Ally Bank	interest=820.00
+1099DIV	payer=Vanguard	ordinary=1400.00	qualified=1100.00	capgain=300.00
