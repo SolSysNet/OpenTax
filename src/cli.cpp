@@ -1,6 +1,7 @@
 #include "opentax/cli.hpp"
 
 #include "opentax/calc.hpp"
+#include "opentax/crypto.hpp"
 #include "opentax/model.hpp"
 #include "opentax/report.hpp"
 #include "opentax/return_pdf.hpp"
@@ -29,6 +30,15 @@ struct Context {
     std::ostream& err;
     std::vector<std::string> args;  // after the command name
     std::vector<std::string> flags;
+    PasswordPrompt prompt;
+    std::optional<PasswordKey> key;  // set when the return was encrypted
+
+    std::string password(const std::string& text) const {
+        std::string pw = prompt(text);
+        if (pw.empty()) throw Error("no password given");
+        return pw;
+    }
+    const PasswordKey* saveKey() const { return key ? &*key : nullptr; }
 
     bool flag(const std::string& name) const {
         for (const auto& f : flags) {
@@ -45,11 +55,37 @@ struct Context {
     }
 };
 
-TaxReturn loadReturn(const Context& c) {
+TaxReturn loadReturn(Context& c) {
     std::error_code ec;
     if (!fs::exists(fs::u8path(c.path), ec))
         throw Error("no return at '" + c.path + "'. Create one with 'opentax new', or pass -f FILE.");
-    return TaxReturn::load(c.path);
+    if (!TaxReturn::isEncryptedFile(c.path)) return TaxReturn::load(c.path);
+    std::string pw = c.password("Password for " + fs::u8path(c.path).filename().u8string() + ": ");
+    PasswordKey key;
+    TaxReturn r = TaxReturn::load(c.path, pw, &key);
+    wipeString(pw);
+    c.key = key;
+    return r;
+}
+
+// Asks for a new password twice.
+PasswordKey newPassword(Context& c) {
+    std::string pw = c.password("New password: ");
+    const std::string problem = passwordProblem(pw);
+    if (!problem.empty()) {
+        wipeString(pw);
+        throw Error(problem);
+    }
+    std::string again = c.password("Confirm new password: ");
+    const bool same = pw == again;
+    wipeString(again);
+    if (!same) {
+        wipeString(pw);
+        throw Error("the passwords don't match");
+    }
+    PasswordKey key = PasswordKey::fromNewPassword(pw);
+    wipeString(pw);
+    return key;
 }
 
 std::string normalizeFormId(std::string_view s) {
@@ -160,7 +196,8 @@ int cmdNew(Context& c) {
         else throw Error("unknown field '" + key + "'");
     }
     if (!isSupportedYear(r.info.year)) throw Error("tax year " + std::to_string(r.info.year) + " is not supported");
-    r.save(c.path);
+    if (c.flag("encrypt")) c.key = newPassword(c);
+    r.save(c.path, c.saveKey());
     c.out << "Created " << c.path << " (" << r.info.year << ", " << choiceLabel(r.info.status) << ")\n";
     return 0;
 }
@@ -170,7 +207,7 @@ int cmdSet(Context& c) {
     TaxReturn r = loadReturn(c);
     const bool ok = withSingle(r, c.args[0], [&](const auto& s, auto& record) { applyAssignments(record, s, c.args, 1); });
     if (!ok) throw Error("'" + c.args[0] + "' is not a section.\n" + recordNames());
-    r.save(c.path);
+    r.save(c.path, c.saveKey());
     c.out << "Updated " << c.args[0] << "\n";
     return 0;
 }
@@ -186,7 +223,7 @@ int cmdAdd(Context& c) {
         count = items.size();
     });
     if (!ok) throw Error("'" + c.args[0] + "' is not a form type.\n" + recordNames());
-    r.save(c.path);
+    r.save(c.path, c.saveKey());
     c.out << "Added " << c.args[0] << " #" << count << "\n";
     return 0;
 }
@@ -199,7 +236,7 @@ int cmdEdit(Context& c) {
         applyAssignments(item, s, c.args, 2);
     });
     if (!ok) throw Error("'" + c.args[0] + "' is not a form type.\n" + recordNames());
-    r.save(c.path);
+    r.save(c.path, c.saveKey());
     c.out << "Updated " << c.args[0] << " #" << c.args[1] << "\n";
     return 0;
 }
@@ -211,7 +248,7 @@ int cmdRemove(Context& c) {
         items.erase(items.begin() + static_cast<std::ptrdiff_t>(parseIndex(c.args[1], items.size())));
     });
     if (!ok) throw Error("'" + c.args[0] + "' is not a form type.\n" + recordNames());
-    r.save(c.path);
+    r.save(c.path, c.saveKey());
     c.out << "Removed " << c.args[0] << " #" << c.args[1] << "\n";
     return 0;
 }
@@ -338,21 +375,43 @@ int cmdPdf(Context& c) {
     file << bytes;
     if (!file) throw Error("failed while writing '" + out + "'");
     c.out << "Wrote " << out << "\n";
+    if (c.key) c.err << "note: the PDF is not encrypted; store it as carefully as the return\n";
     if (result.hasErrors()) c.err << "warning: the return has errors; run 'opentax check'\n";
     return 0;
 }
 
+int cmdEncrypt(Context& c) {
+    TaxReturn r = loadReturn(c);
+    const bool had = c.key.has_value();
+    c.key = newPassword(c);
+    r.save(c.path, c.saveKey());
+    c.out << (had ? "Changed the password for " : "Encrypted ") << c.path << "\n"
+          << "Keep the password safe: without it, nobody can open this return.\n";
+    return 0;
+}
+
+int cmdDecrypt(Context& c) {
+    TaxReturn r = loadReturn(c);
+    if (!c.key) throw Error("'" + c.path + "' isn't encrypted");
+    c.key.reset();
+    r.save(c.path);
+    c.out << "Removed the password from " << c.path << "\n";
+    return 0;
+}
+
 int cmdHelp(Context& c) {
-    c.out << "OpenTax " << kVersion << " - free, open source federal income tax preparation (tax year 2025)\n\n"
+    c.out << "OpenTax " << kVersion << " - free, open source federal income tax preparation (tax years 2025 and 2026)\n\n"
           << "Usage: opentax [-f FILE] COMMAND [ARGS]\n\n"
           << "The return file defaults to $OPENTAX_FILE, then ./" << kDefaultFile << "\n\n"
           << "Entering your information\n"
-          << "  new [status=mfj] [first=Jane last=Doe dob=1985-04-02]   start a return\n"
+          << "  new [year=2026] [status=mfj] [first=Jane last=Doe dob=1985-04-02] [--encrypt]   start a return\n"
           << "  set SECTION key=value...        e.g. set spouse first=Sam dob=1984-09-30\n"
           << "  add FORM key=value...           e.g. add w2 employer=Acme wages=85000 fedwh=9100\n"
           << "  edit FORM N key=value...        change entry N\n"
           << "  remove FORM N                   delete entry N\n"
           << "  list [FORM|SECTION]             show what you've entered\n"
+          << "  encrypt                         protect the return with a password (or change it)\n"
+          << "  decrypt                         remove the password\n"
           << "  fields FORM|SECTION             the keys a form or section accepts\n\n"
           << "Results\n"
           << "  summary                         refund or amount owed, and the main figures (default)\n"
@@ -362,13 +421,20 @@ int cmdHelp(Context& c) {
           << "  explain FORM LINE               how a line was figured, e.g. explain 1040 16\n"
           << "  pdf [FILE] [--force] [--no-explanations] [--no-worksheets]\n"
           << "  csv                             every line of every form as CSV\n\n"
-          << recordNames();
+          << recordNames()
+          << "\nEncrypted returns ask for their password; for scripts, set OPENTAX_PASSWORD instead.\n";
     return 0;
 }
 
 }  // namespace
 
-int runCli(const std::vector<std::string>& argsIn, std::ostream& out, std::ostream& err) {
+int runCli(const std::vector<std::string>& argsIn, std::ostream& out, std::ostream& err, PasswordPrompt prompt) {
+    if (!prompt) {
+        prompt = [](const std::string&) -> std::string {
+            if (const char* env = std::getenv("OPENTAX_PASSWORD"); env && *env) return env;
+            throw Error("this return is encrypted; set OPENTAX_PASSWORD or run opentax in a terminal");
+        };
+    }
     std::string path;
     if (const char* env = std::getenv("OPENTAX_FILE"); env && *env) path = env;
     std::vector<std::string> positional;
@@ -394,14 +460,16 @@ int runCli(const std::vector<std::string>& argsIn, std::ostream& out, std::ostre
     }
     if (path.empty()) path = kDefaultFile;
     const std::string command = positional.empty() ? "summary" : positional[0];
-    Context c{path, out, err, std::vector<std::string>(positional.begin() + (positional.empty() ? 0 : 1), positional.end()), flags};
+    Context c{path, out, err, std::vector<std::string>(positional.begin() + (positional.empty() ? 0 : 1), positional.end()), flags,
+              prompt, std::nullopt};
 
     using Handler = int (*)(Context&);
     const std::pair<const char*, Handler> commands[] = {
         {"new", cmdNew},       {"set", cmdSet},     {"add", cmdAdd},           {"edit", cmdEdit},
         {"remove", cmdRemove}, {"list", cmdList},   {"fields", cmdFields},     {"summary", cmdSummary},
         {"forms", cmdForms},   {"form", cmdForm},   {"explain", cmdExplain},   {"check", cmdCheck},
-        {"csv", cmdCsv},       {"pdf", cmdPdf},     {"help", cmdHelp},
+        {"csv", cmdCsv},       {"pdf", cmdPdf},     {"help", cmdHelp},         {"encrypt", cmdEncrypt},
+        {"decrypt", cmdDecrypt},
     };
     for (const auto& [name, handler] : commands) {
         if (command != name) continue;

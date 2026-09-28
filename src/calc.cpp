@@ -206,6 +206,7 @@ public:
         deductions();
         schedule1A();
         qbi();
+        itemizedLimitation();
         taxableIncome();
         tax();
         amt();
@@ -269,6 +270,9 @@ private:
     bool is65(const Person& p) const { return p.birthDate && irsAgeAtEndOfYear(*p.birthDate, year()) >= 65; }
     bool is50(const Person& p) const { return p.birthDate && irsAgeAtEndOfYear(*p.birthDate, year()) >= 50; }
     int year() const { return r_.info.year; }
+    std::string yr(int offset = 0) const { return std::to_string(year() + offset); }
+    // The 65-or-older test: born before January 2 of the year 64 years before the tax year.
+    std::string seniorBirthDate() const { return "January 2, " + yr(-64); }
 
     Money wagesOf(Owner o) const {
         Money m;
@@ -341,6 +345,7 @@ private:
         Owner owner;
         std::string name;
         Money net;
+        bool active;
     };
     std::vector<BusinessResult> biz_;
     std::array<Money, 2> bizNet_{};  // by owner
@@ -400,7 +405,7 @@ private:
                       std::to_string(sqft) + " sq ft x " + usd(rules_.homeOfficeRate) + ", limited to the tentative profit");
             }
             const Money net = f.add("31", "Net profit or (loss)", l29 - office);
-            biz_.push_back({b.owner, name, net});
+            biz_.push_back({b.owner, name, net, b.materialParticipation});
             bizNet_[idx(b.owner)] += net;
         }
     }
@@ -668,7 +673,7 @@ private:
         } else {
             const Money limit = mfs() ? rules_.capitalLossLimitMfs : rules_.capitalLossLimit;
             capitalLine7_ = d.add("21", "Allowable capital loss", maxOf(schD16_, -limit),
-                                  "The smaller of the loss or " + usd(limit) + "; the rest carries over to 2026");
+                                  "The smaller of the loss or " + usd(limit) + "; the rest carries over to " + yr(1));
             f1040().add("7a", "Capital gain or (loss)", capitalLine7_, "Schedule D, line 21");
         }
     }
@@ -815,26 +820,24 @@ private:
             const bool anyCovered = coveredTp || coveredSp;
             if (anyCovered) {
                 const bool selfCovered = o == Owner::Taxpayer ? coveredTp : coveredSp;
+                // Line 2: where the deduction reaches zero. The phase-out range is $10,000, or
+                // $20,000 for a covered person filing jointly (or as a qualifying surviving spouse).
                 Money l2;
-                Money fullRange = dollars(10000);
-                int rate = is50(p) ? 80 : 70;
+                Money range = dollars(10000);
                 switch (st_) {
                     case FilingStatus::MarriedJoint:
-                        l2 = selfCovered ? dollars(146000) : dollars(246000);
-                        if (selfCovered) {
-                            fullRange = dollars(20000);
-                            rate = is50(p) ? 40 : 35;
-                        }
+                        l2 = selfCovered ? pick(rules_.iraPhaseEnd, st_) : rules_.iraPhaseEndSpouseCovered;
+                        if (selfCovered) range = dollars(20000);
                         break;
                     case FilingStatus::QualifyingSurvivingSpouse:
-                        l2 = dollars(146000);
-                        fullRange = dollars(20000);
-                        rate = is50(p) ? 40 : 35;
+                        l2 = pick(rules_.iraPhaseEnd, st_);
+                        range = dollars(20000);
                         break;
                     case FilingStatus::MarriedSeparate:
-                        l2 = r_.info.livedApartAllYear ? dollars(89000) : dollars(10000);
+                        l2 = r_.info.livedApartAllYear ? pick(rules_.iraPhaseEnd, FilingStatus::Single)
+                                                       : pick(rules_.iraPhaseEnd, st_);
                         break;
-                    default: l2 = dollars(89000);
+                    default: l2 = pick(rules_.iraPhaseEnd, st_);
                 }
                 f.add(std::string("2") + col, who + ": phase-out end", l2);
                 f.add(std::string("5") + col, who + ": modified AGI", magi, "Line 3 (total income " + usd(l3) + ") minus line 4 (adjustments " + usd(l4) + ")");
@@ -844,14 +847,19 @@ private:
                 } else {
                     const Money l6 = l2 - magi;
                     f.add(std::string("6") + col, who + ": line 2 minus line 5", l6);
-                    if (l6 < fullRange) {
-                        Money l7 = pct(l6, rate);
-                        const std::int64_t c = l7.cents();
-                        l7 = Money::fromCents(((c + 999) / 1000) * 1000);  // up to the next $10
+                    if (l6 < range) {
+                        // Line 7: the limit times the part of the range still remaining (the
+                        // worksheet's 70%/35%, or 80%/40% with the catch-up, for 2025), rounded up
+                        // to the next $10, and at least $200.
+                        const std::int64_t tenDollars = 1000;
+                        const std::int64_t num = full.cents() * l6.cents();
+                        const std::int64_t den = range.cents() * tenDollars;
+                        Money l7 = Money::fromCents(((num + den - 1) / den) * tenDollars);
                         if (l7 < dollars(200)) l7 = dollars(200);
                         limit = minOf(l7, full);
+                        const Decimal rate = Decimal::fromRaw(full.cents() * 100 * Decimal::kScale / range.cents());
                         f.add(std::string("7") + col, who + ": deduction limit", limit,
-                              "Line 6 x " + std::to_string(rate) + "%, rounded up to a multiple of $10 (at least $200)");
+                              "Line 6 x " + rate.str() + "%, rounded up to a multiple of $10 (at least $200)");
                     } else {
                         f.add(std::string("7") + col, who + ": deduction limit", full, "Not reduced");
                     }
@@ -921,7 +929,7 @@ private:
 
         Builder& f = begin("Standard Deduction", dependent ? "Standard Deduction Worksheet for Dependents (line 12e)"
                                                            : "Standard Deduction (line 12e)", kOrderWorksheet, true);
-        f.text("1", "Boxes checked (born before Jan 2, 1961, or blind)", std::to_string(boxes));
+        f.text("1", "Boxes checked (born before " + seniorBirthDate() + ", or blind)", std::to_string(boxes));
         Money l4a = base;
         if (dependent) {
             const Money earned = L("1z") + builders_[iSch1_].form.get("3") - builders_[iSch1_].form.get("15");
@@ -946,10 +954,11 @@ private:
         }
         const bool anyInput = !it.medical.isZero() || !it.stateIncomeTax.isZero() || !it.salesTax.isZero() ||
                               !it.realEstateTax.isZero() || !it.personalPropertyTax.isZero() || !it.otherTaxes.isZero() ||
-                              !it.mortgageInterest.isZero() || !it.mortgagePoints.isZero() || !it.investmentInterest.isZero() ||
-                              !it.charityCash.isZero() || !it.charityNoncash.isZero() || !it.charityCarryover.isZero() ||
-                              !it.otherItemized.isZero() || !w2State.isZero();
+                              !it.mortgageInterest.isZero() || !it.mortgagePoints.isZero() || !it.mortgageInsurance.isZero() ||
+                              !it.investmentInterest.isZero() || !it.charityCash.isZero() || !it.charityNoncash.isZero() ||
+                              !it.charityCarryover.isZero() || !it.otherItemized.isZero() || !w2State.isZero();
         if (!anyInput) return kZero;
+        const bool y26 = rules_.formsYear >= 2026;
         const Money agi = L("11b");
         Builder& f = begin("Schedule A", "Itemized Deductions", kOrderSchA);
         const Money l1 = f.add("1", "Medical and dental expenses", it.medical);
@@ -966,25 +975,60 @@ private:
         const Money l6 = f.add("6", "Other taxes", it.otherTaxes);
         saltLine7_ = f.add("7", "Add lines 5e and 6", l5e + l6);
         const Money l8a = f.add("8a", "Home mortgage interest and points (Form 1098)", it.mortgageInterest + it.mortgagePoints);
-        f.add("8e", "Add lines 8a through 8c", l8a);
+        Money l8d;
+        if (!it.mortgageInsurance.isZero()) {
+            if (!rules_.mortgageInsurance) {
+                diag(Severity::Warning, "Mortgage insurance",
+                     "Mortgage insurance premiums aren't deductible for " + yr() + ". They are again from 2026.");
+            } else {
+                // Sec. 163(h)(3)(E): reduced 10% for each $1,000 ($500 if married filing separately),
+                // or part of one, of AGI over $100,000 ($50,000).
+                const Money start = mfs() ? dollars(50000) : dollars(100000);
+                const std::int64_t step = mfs() ? 50000 : 100000;  // cents
+                const std::int64_t over = pos(agi - start).cents();
+                const int reduce = static_cast<int>(std::min<std::int64_t>(10, (over + step - 1) / step)) * 10;
+                l8d = f.add("8d", "Mortgage insurance premiums", it.mortgageInsurance - pct(it.mortgageInsurance, reduce),
+                            reduce == 0 ? std::string()
+                                        : usd(it.mortgageInsurance) + " reduced by " + std::to_string(reduce) +
+                                              "% because AGI is over " + usd(start));
+            }
+        }
+        const Money l8e = f.add("8e", y26 ? "Add lines 8a through 8d" : "Add lines 8a through 8c", l8a + l8d);
         Money investLimit = pos(L("2b") + L("3b") - L("3a"));
         Money invest = minOf(it.investmentInterest, investLimit);
         if (it.investmentInterest > investLimit)
             diag(Severity::Warning, "Investment interest", "Limited to net investment income (" + usd(investLimit) + "). The rest carries forward (Form 4952).");
         const Money l9 = f.add("9", "Investment interest", invest);
-        const Money l10 = f.add("10", "Add lines 8e and 9", l8a + l9);
+        const Money l10 = f.add("10", "Add lines 8e and 9", l8e + l9);
+
         const Money l11 = f.add("11", "Gifts by cash or check", it.charityCash);
         const Money cap30 = pct(agi, 30);
         const Money l12 = f.add("12", "Other than by cash or check", minOf(it.charityNoncash, cap30),
                                 it.charityNoncash > cap30 ? "Limited to 30% of AGI" : "");
-        const Money l13 = f.add("13", "Carryover from prior year", it.charityCarryover);
         const Money cap60 = pct(agi, 60);
-        const Money l14 = f.add("14", "Gifts to charity", minOf(l11 + l12 + l13, cap60),
-                                l11 + l12 + l13 > cap60 ? "Limited to 60% of AGI" : "");
-        if (it.charityNoncash > cap30 || l11 + l12 + l13 > cap60)
+        Money gifts;
+        bool overLimit = false;
+        if (!y26) {
+            const Money l13 = f.add("13", "Carryover from prior year", it.charityCarryover);
+            gifts = f.add("14", "Gifts to charity", minOf(l11 + l12 + l13, cap60), l11 + l12 + l13 > cap60 ? "Limited to 60% of AGI" : "");
+            overLimit = it.charityNoncash > cap30 || l11 + l12 + l13 > cap60;
+        } else {
+            // Gifts count only to the extent they exceed 0.5% of AGI (sec. 170(b)(1)(I)).
+            const Money limited = minOf(l11 + l12, cap60);
+            const Money floor = pct(agi, rules_.charityFloorPercent);
+            const Money l13 = f.add("13", "Gifts after AGI limits and the 0.5% floor", pos(limited - floor),
+                                    usd(limited) + " allowed" + (l11 + l12 > cap60 ? " (limited to 60% of AGI)" : "") +
+                                        " minus " + usd(floor) + " (0.5% of AGI)");
+            const Money l14 = f.add("14", "Carryover from prior year", it.charityCarryover);
+            gifts = f.add("15", "Add lines 13 and 14", l13 + l14);
+            overLimit = it.charityNoncash > cap30 || l11 + l12 > cap60;
+            charityProvisional_ = !(l11 + l12).isZero();
+        }
+        if (overLimit)
             diag(Severity::Warning, "Charitable gifts", "Your gifts exceed the AGI limits. The excess carries forward for 5 years; see Pub. 526 for the exact limits that apply to you.");
-        const Money l16 = f.add("16", "Other itemized deductions", it.otherItemized);
-        return f.add("17", "Total itemized deductions", l4 + saltLine7_ + l10 + l14 + l16);
+        const Money other = f.add(y26 ? "17z" : "16", "Other itemized deductions", it.otherItemized);
+        itemizedLine_ = y26 ? "18" : "17";
+        return f.add(itemizedLine_, "Total itemized deductions", l4 + saltLine7_ + l10 + gifts + other);
     }
 
     Money salt(Money l5d, Money agi) {
@@ -1009,7 +1053,11 @@ private:
         standard_ = standardDeduction();
         itemized_ = scheduleA();
         const bool mustItemize = mfs() && r_.info.spouseItemizes;
-        itemize_ = !itemized_.isZero() && (itemized_ > standard_ || r_.info.forceItemize || mustItemize);
+        // From 2026, people who don't itemize can deduct some cash gifts (line 12f), so that is
+        // part of the comparison.
+        const Money charityCap = pick(rules_.nonItemizerCharity, st_);
+        const Money nonItemizer = mustItemize ? kZero : minOf(r_.itemized.charityCash, charityCap);
+        itemize_ = !itemized_.isZero() && (itemized_ > standard_ + nonItemizer || r_.info.forceItemize || mustItemize);
         const Money d = itemize_ ? itemized_ : standard_;
         if (!itemize_ && !itemized_.isZero()) {
             for (auto& b : builders_) {
@@ -1023,20 +1071,77 @@ private:
         std::string how;
         if (itemize_) {
             how = "Itemized deductions (Schedule A) of " + usd(itemized_);
-            how += itemized_ > standard_ ? ", more than the " + usd(standard_) + " standard deduction"
-                                         : mustItemize ? " (required because your spouse itemizes)" : " (you chose to itemize)";
+            if (itemized_ > standard_ + nonItemizer) {
+                how += ", more than the " + usd(standard_) + " standard deduction";
+                if (!nonItemizer.isZero()) how += " plus " + usd(nonItemizer) + " of non-itemizer charitable gifts";
+            } else {
+                how += mustItemize ? " (required because your spouse itemizes)" : " (you chose to itemize)";
+            }
         } else {
             how = "Standard deduction for " + std::string(choiceLabel(st_)) + " (" + usd(standard_) + ")";
             if (!itemized_.isZero()) how += ", more than itemized deductions of " + usd(itemized_);
             if (mustItemize) how = "Zero: your spouse itemizes on a separate return";
         }
         f1040().add("12e", "Standard deduction or itemized deductions", d, how);
+        if (itemize_ && charityProvisional_)
+            diag(Severity::Info, "Charitable gifts",
+                 "Provisional: the 2026 Charitable Contribution Limitation Worksheet isn't published yet. OpenTax applies "
+                 "the 60%/30% AGI limits and the new 0.5% floor as written in the law.");
+        if (rules_.formsYear >= 2026) {
+            nonItemizer_ = itemize_ ? kZero : nonItemizer;
+            f1040().add("12f", "Charitable contribution deduction for non-itemizers", nonItemizer_,
+                        nonItemizer_.isZero() ? std::string()
+                                              : "Cash gifts of " + usd(r_.itemized.charityCash) + ", up to " + usd(charityCap));
+            if (!nonItemizer_.isZero())
+                diag(Severity::Info, "Charitable gifts",
+                     "Line 12f counts only cash gifts to public charities; gifts to donor-advised funds and supporting organizations don't qualify.");
+        }
+    }
+
+    // Sec. 68 (from 2026): itemized deductions are reduced by 2/37 of the smaller of the itemized
+    // deductions or the amount by which taxable income plus those deductions exceeds the start
+    // of the 37% bracket.
+    void itemizedLimitation() {
+        if (!rules_.itemizedLimitation || !itemize_) return;
+        const LineIds& ids = lineIds(rules_.formsYear);
+        const Money base = L("11b") - L(ids.schedule1A) - L(ids.qbi);
+        const auto& brackets = pick(rules_.brackets, st_);
+        const Money top = brackets[brackets.size() - 2].upTo;
+        if (base <= top) return;
+        Builder& f = begin("Itemized Deduction Limitation", "Itemized Deductions Limitation (Schedule A, line 18)", kOrderWorksheet, true);
+        const Money l1 = f.add("1", "Itemized deductions before the limitation", itemized_);
+        f.add("2", "Taxable income plus itemized deductions", base,
+              std::string("Form 1040 line 11b minus lines ") + ids.schedule1A + " and " + ids.qbi);
+        f.add("3", "Start of the 37% bracket", top);
+        const Money l4 = f.add("4", "Subtract line 3 from line 2", base - top);
+        const Money l5 = f.add("5", "Smaller of line 1 or line 4", minOf(l1, l4));
+        const std::int64_t twice = l5.cents() * 2;
+        const Money l6 = f.add("6", "Line 5 x 2/37", Money::fromCents((twice + 18) / 37));
+        const Money l7 = f.add("7", "Limited itemized deductions", l1 - l6, "To Schedule A, line 18, and Form 1040, line 12e");
+        diag(Severity::Info, "Itemized deductions",
+             "Provisional: your itemized deductions are reduced by " + usd(l6) +
+                 " under the 2026 limit for the 37% bracket. The IRS worksheet isn't published yet; OpenTax follows the law as written.");
+        itemized_ = l7;
+        for (auto& b : builders_) {
+            for (auto& line : b.form.lines) {
+                if ((b.form.id == "Schedule A" && line.number == itemizedLine_) || (b.form.id == "1040" && line.number == "12e")) {
+                    line.amount = l7;
+                    line.how = "Itemized deductions of " + usd(l1) + " less the " + usd(l6) + " limitation for the 37% bracket";
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------- Schedule 1-A
     Money sch1ASenior_;
+    Money nonItemizer_;
+    std::string itemizedLine_ = "17";
+    bool charityProvisional_ = false;
 
     void schedule1A() {
+        const LineIds& ids = lineIds(rules_.formsYear);
+        const bool y26 = rules_.formsYear >= 2026;
+        auto N = [y26](const char* a2025, const char* a2026) { return std::string(y26 ? a2026 : a2025); };
         Money tips, overtime;
         for (const auto& w : r_.w2s) {
             if (!counts(w.owner) || !person(w.owner).hasValidSsn) continue;
@@ -1046,63 +1151,65 @@ private:
         const Money car = r_.adjustments.carLoanInterest;
         const bool senTp = is65(r_.taxpayer) && r_.taxpayer.hasValidSsn;
         const bool senSp = joint() && is65(r_.spouse) && r_.spouse.hasValidSsn;
+        const std::string toLine = std::string("Additional deductions from Schedule 1-A, line ") + ids.sch1ATotal;
         if (tips.isZero() && overtime.isZero() && car.isZero() && !senTp && !senSp) {
-            f1040().add("13b", "Additional deductions from Schedule 1-A, line 38", kZero);
+            f1040().add(ids.schedule1A, toLine, kZero);
             return;
         }
         Builder& f = begin("Schedule 1-A", "Additional Deductions", kOrderSch1A);
         const Money magi = f.add("3", "Modified AGI", L("11b"), "Form 1040, line 11b");
         const bool marriedSeparate = mfs();
-        Money l13, l21, l30, l37;
+        Money tipsDed, overtimeDed, carDed, senior;
         if (!tips.isZero()) {
             if (marriedSeparate) {
                 diag(Severity::Warning, "No tax on tips", "Married couples must file jointly to deduct qualified tips.");
             } else {
-                f.add("4c", "Qualified tips received as an employee", tips, "Qualified tips entered on Forms W-2");
-                const Money l7 = f.add("7", "Smaller of line 6 or $25,000", minOf(tips, rules_.tipsLimit));
-                const Money l9 = pick(rules_.tipsPhaseStart, st_);
-                const Money l10 = f.add("10", "Modified AGI over " + usd(l9), pos(magi - l9));
-                const Money l12 = f.add("12", "$100 for each full $1,000 on line 10", dollars(100 * thousandsDown(l10)));
-                l13 = f.add("13", "Qualified tips deduction", pos(l7 - l12));
+                f.add(N("4c", "5"), "Qualified tips received as an employee", tips, "Qualified tips entered on Forms W-2");
+                const Money limited = f.add(N("7", "9"), "Smaller of qualified tips or $25,000", minOf(tips, rules_.tipsLimit));
+                const Money start = pick(rules_.tipsPhaseStart, st_);
+                const Money excess = f.add(N("10", "12"), "Modified AGI over " + usd(start), pos(magi - start));
+                const Money reduce = f.add(N("12", "14"), "$100 for each full $1,000 of the excess", dollars(100 * thousandsDown(excess)));
+                tipsDed = f.add(N("13", "15"), "Qualified tips deduction", pos(limited - reduce));
             }
         }
         if (!overtime.isZero()) {
             if (marriedSeparate) {
                 diag(Severity::Warning, "No tax on overtime", "Married couples must file jointly to deduct qualified overtime.");
             } else {
-                f.add("14c", "Qualified overtime compensation", overtime, "Qualified overtime entered on Forms W-2");
-                const Money l15 = f.add("15", "Smaller of line 14c or " + usd(pick(rules_.overtimeLimit, st_)),
-                                        minOf(overtime, pick(rules_.overtimeLimit, st_)));
-                const Money l17 = pick(rules_.tipsPhaseStart, st_);
-                const Money l18 = f.add("18", "Modified AGI over " + usd(l17), pos(magi - l17));
-                const Money l20 = f.add("20", "$100 for each full $1,000 on line 18", dollars(100 * thousandsDown(l18)));
-                l21 = f.add("21", "Qualified overtime compensation deduction", pos(l15 - l20));
+                f.add(N("14c", "17"), "Qualified overtime compensation", overtime, "Qualified overtime entered on Forms W-2");
+                const Money limited = f.add(N("15", "21"), "Smaller of qualified overtime or " + usd(pick(rules_.overtimeLimit, st_)),
+                                            minOf(overtime, pick(rules_.overtimeLimit, st_)));
+                const Money start = pick(rules_.tipsPhaseStart, st_);
+                const Money excess = f.add(N("18", "24"), "Modified AGI over " + usd(start), pos(magi - start));
+                const Money reduce = f.add(N("20", "26"), "$100 for each full $1,000 of the excess", dollars(100 * thousandsDown(excess)));
+                overtimeDed = f.add(N("21", "27"), "Qualified overtime compensation deduction", pos(limited - reduce));
             }
         }
         if (!car.isZero()) {
-            f.add("23", "Qualified passenger vehicle loan interest", car);
-            const Money l24 = f.add("24", "Smaller of line 23 or $10,000", minOf(car, rules_.carLoanLimit));
-            const Money l26 = pick(rules_.carLoanPhaseStart, st_);
-            const Money l27 = f.add("27", "Modified AGI over " + usd(l26), pos(magi - l26));
-            const Money l29 = f.add("29", "$200 for each $1,000 (or part) on line 27", dollars(200 * thousandsUp(l27)));
-            l30 = f.add("30", "Car loan interest deduction", pos(l24 - l29));
+            f.add(N("23", "29"), "Qualified passenger vehicle loan interest", car);
+            const Money limited = f.add(N("24", "30"), "Smaller of the interest or $10,000", minOf(car, rules_.carLoanLimit));
+            const Money start = pick(rules_.carLoanPhaseStart, st_);
+            const Money excess = f.add(N("27", "33"), "Modified AGI over " + usd(start), pos(magi - start));
+            const Money reduce = f.add(N("29", "35"), "$200 for each $1,000 (or part) of the excess", dollars(200 * thousandsUp(excess)));
+            carDed = f.add(N("30", "36"), "Car loan interest deduction", pos(limited - reduce));
         }
         if (senTp || senSp) {
             if (marriedSeparate) {
                 diag(Severity::Warning, "Senior deduction", "Married couples must file jointly to take the enhanced deduction for seniors.");
             } else {
-                const Money l32 = pick(rules_.seniorPhaseStart, st_);
-                const Money l33 = f.add("33", "Modified AGI over " + usd(l32), pos(magi - l32));
-                const Money l34 = f.add("34", "Line 33 x 6%", pct(l33, rules_.seniorPhasePercent));
-                const Money l35 = f.add("35", "Subtract line 34 from $6,000", pos(rules_.seniorDeduction - l34));
-                const Money a = f.add("36a", "You (born before January 2, 1961)", senTp ? l35 : kZero);
-                const Money b = joint() ? f.add("36b", "Spouse (born before January 2, 1961)", senSp ? l35 : kZero) : kZero;
-                l37 = f.add("37", "Enhanced deduction for seniors", a + b);
+                const Money start = pick(rules_.seniorPhaseStart, st_);
+                const Money excess = f.add(N("33", "39"), "Modified AGI over " + usd(start), pos(magi - start));
+                const Money reduce = f.add(N("34", "40"), "Excess x 6%", pct(excess, rules_.seniorPhasePercent));
+                const Money each = f.add(N("35", "41"), "Subtract that from $6,000", pos(rules_.seniorDeduction - reduce));
+                const Money a = f.add(N("36a", "42a"), "You (born before " + seniorBirthDate() + ")", senTp ? each : kZero);
+                const Money b = joint() ? f.add(N("36b", "42b"), "Spouse (born before " + seniorBirthDate() + ")", senSp ? each : kZero) : kZero;
+                senior = f.add(ids.sch1ASenior, "Enhanced deduction for seniors", a + b);
             }
         }
-        sch1ASenior_ = l37;
-        const Money total = f.add("38", "Total additional deductions", l13 + l21 + l30 + l37, "To Form 1040, line 13b");
-        f1040().add("13b", "Additional deductions from Schedule 1-A, line 38", total);
+        sch1ASenior_ = senior;
+        const Money total = f.add(ids.sch1ATotal, "Total additional deductions", tipsDed + overtimeDed + carDed + senior,
+                                  std::string("To Form 1040, line ") + ids.schedule1A);
+        f1040().add(ids.schedule1A, toLine, total);
     }
 
     // ------------------------------------------------------------- QBI
@@ -1113,27 +1220,30 @@ private:
     }
 
     void qbi() {
+        const LineIds& ids = lineIds(rules_.formsYear);
+        const bool y26 = rules_.formsYear >= 2026;
         Money reit;
         for (const auto& d : r_.dividends) reit += d.section199a;
         const bool hasBiz = !biz_.empty();
         if (!hasBiz && reit.isZero() && r_.carryovers.qbiLoss.isZero()) {
-            f1040().add("13a", "Qualified business income deduction", kZero);
+            f1040().add(ids.qbi, "Qualified business income deduction", kZero);
             return;
         }
-        const Money before = L("11b") - L("12e") - L("13b");
+        const Money before = L("11b") - L("12e") - L("12f") - L(ids.schedule1A);
         if (before > pick(rules_.qbiThreshold, st_)) {
             diag(Severity::Error, "QBI deduction",
                  "Taxable income before the QBI deduction (" + usd(before) + ") is above " + usd(pick(rules_.qbiThreshold, st_)) +
                      ". Form 8995-A (wage and property limits, specified service businesses) isn't supported yet, so no QBI deduction is taken.");
-            f1040().add("13a", "Qualified business income deduction", kZero, "Not computed: Form 8995-A required");
+            f1040().add(ids.qbi, "Qualified business income deduction", kZero, "Not computed: Form 8995-A required");
             return;
         }
         Builder& f = begin("Form 8995", "Qualified Business Income Deduction Simplified Computation", kOrder8995);
-        Money totalNet;
+        Money totalNet, activeNet;
         int n = 0;
         for (const auto& b : biz_) {
             f.add("1." + std::to_string(++n), b.name + " net profit", b.net);
             totalNet += b.net;
+            if (b.active) activeNet += b.net;
         }
         const Money half = seHalf_[0] + (joint() ? seHalf_[1] : kZero);
         const Money reductions = half + seHealth_ + r_.adjustments.sepSimple;
@@ -1148,20 +1258,39 @@ private:
         const Money l8 = f.add("8", "Total qualified REIT dividends", pos(l6));
         const Money l9 = f.add("9", "Line 8 x 20%", pct(l8, 20));
         const Money l10 = f.add("10", "Add lines 5 and 9", l5 + l9);
-        const Money l11 = f.add("11", "Taxable income before QBI deduction", before, "Line 11b minus lines 12e and 13b");
+        const Money l11 = f.add("11", "Taxable income before QBI deduction", before,
+                                std::string("Line 11b minus lines 12e") + (y26 ? ", 12f" : "") + " and " + ids.schedule1A);
         const Money l12 = f.add("12", "Net capital gain", netCapitalGainForRates(), "Qualified dividends plus net capital gain");
         const Money l13 = f.add("13", "Subtract line 12 from line 11", pos(l11 - l12));
         const Money l14 = f.add("14", "Income limitation (line 13 x 20%)", pct(l13, 20));
-        const Money l15 = f.add("15", "Qualified business income deduction", minOf(l10, l14), "Smaller of line 10 or line 14");
-        if (l2 + l3 < kZero) {
-            f.add("16", "Net loss carryforward to 2026", l2 + l3);
-            diag(Severity::Info, "QBI deduction", "Your qualified business loss of " + usd(-(l2 + l3)) + " carries forward to 2026 (Form 8995, line 16).");
+        const Money l15 = f.add("15", y26 ? "Deduction before the minimum deduction" : "Qualified business income deduction",
+                                minOf(l10, l14), "Smaller of line 10 or line 14");
+        Money deduction = l15;
+        std::string carryLine = "16";
+        if (y26) {
+            // Minimum deduction for at least $1,000 of QBI from businesses you materially participate
+            // in. Deductions that reduce QBI are all attributed to the active businesses.
+            const Money activeQbi = activeNet - reductions;
+            const bool eligible = !rules_.qbiMinimumDeduction.isZero() && activeQbi >= rules_.qbiMinimumActive;
+            const Money l16 = f.add("16", "Minimum deduction for active qualified business income",
+                                    eligible ? rules_.qbiMinimumDeduction : kZero,
+                                    eligible ? "At least " + usd(rules_.qbiMinimumActive) + " of QBI from businesses you materially participate in"
+                                             : std::string());
+            deduction = f.add("17", "Qualified business income deduction", maxOf(l15, l16), "Larger of line 15 or line 16");
+            carryLine = "18";
         }
-        f1040().add("13a", "Qualified business income deduction", l15, "Form 8995, line 15");
+        if (l2 + l3 < kZero) {
+            f.add(carryLine, "Net loss carryforward to " + yr(1), l2 + l3);
+            diag(Severity::Info, "QBI deduction", "Your qualified business loss of " + usd(-(l2 + l3)) + " carries forward to " +
+                                                      yr(1) + " (Form 8995, line " + carryLine + ").");
+        }
+        f1040().add(ids.qbi, "Qualified business income deduction", deduction, std::string("Form 8995, line ") + (y26 ? "17" : "15"));
     }
 
     void taxableIncome() {
-        const Money l14 = f1040().add("14", "Total deductions", L("12e") + L("13a") + L("13b"), "Add lines 12e, 13a, and 13b");
+        const bool y26 = rules_.formsYear >= 2026;
+        const Money l14 = f1040().add("14", "Total deductions", L("12e") + L("12f") + L("13a") + L("13b"),
+                                      y26 ? "Add lines 12e, 12f, 13a, and 13b" : "Add lines 12e, 13a, and 13b");
         f1040().add("15", "Taxable income", pos(L("11b") - l14), "Line 11b minus line 14 (not less than zero)");
     }
 
@@ -1174,7 +1303,7 @@ private:
         const bool pref = L("3a") > kZero || (hasSchD_ ? (schD15_ > kZero && schD16_ > kZero) : capGainDist_ > kZero);
         if (!pref) {
             const Money t = incomeTax(ti, st_, rules_);
-            f1040().add("16", "Tax", t, ti < dollars(100000) ? "From the 2025 Tax Table" : "From the 2025 Tax Computation Worksheet");
+            f1040().add("16", "Tax", t, ti < dollars(100000) ? "From the " + yr() + " Tax Table" : "From the " + yr() + " Tax Computation Worksheet");
             return;
         }
         usedQdcg_ = true;
@@ -1223,7 +1352,7 @@ private:
         const Money l4 = l1b + l2a;
         const Money exemption = pick(rules_.amtExemption, st_);
         const Money start = pick(rules_.amtPhaseStart, st_);
-        const Money l5 = l4 > start ? pos(exemption - pct(l4 - start, 25)) : exemption;
+        const Money l5 = l4 > start ? pos(exemption - pct(l4 - start, rules_.amtPhasePercent)) : exemption;
         const Money l6 = pos(l4 - l5);
         Money amtTax;
         Money tmt;
@@ -1257,11 +1386,11 @@ private:
         }
         if (!amtTax.isZero()) {
             Builder& f = begin("Form 6251", "Alternative Minimum Tax", kOrder6251);
-            f.add("1a", "Form 1040 line 14 minus Schedule 1-A line 37", l1a);
+            f.add("1a", std::string("Form 1040 line 14 minus Schedule 1-A line ") + lineIds(rules_.formsYear).sch1ASenior, l1a);
             f.add("1b", "Line 11b minus line 1a", l1b);
             f.add("2a", itemize_ ? "Taxes from Schedule A, line 7" : "Standard deduction (line 12e)", l2a);
             f.add("4", "Alternative minimum taxable income", l4);
-            f.add("5", "Exemption", l5, l4 > start ? "Reduced by 25% of AMTI over " + usd(start) : "");
+            f.add("5", "Exemption", l5, l4 > start ? "Reduced by " + rules_.amtPhasePercent.str() + "% of AMTI over " + usd(start) : "");
             f.add("6", "Subtract line 5 from line 4", l6);
             f.add("7", "Tentative minimum tax before credits", tmt, usedQdcg_ ? "Part III (capital gain rates)" : "26%/28% rates");
             f.add("9", "Tentative minimum tax", tmt);
@@ -1312,10 +1441,13 @@ private:
                                        joint() ? earnedIncome(Owner::Spouse) : l4);
                 const Money l6 = f.add("6", "Smallest of line 3, 4, or 5", pos(minOf(l3, minOf(l4, l5))));
                 f.add("7", "Adjusted gross income", agi);
-                const std::int64_t over = pos(agi - dollars(15000)).cents();
-                const int reduce = static_cast<int>((over + 199999) / 200000);  // per $2,000 or part
-                const int rate = std::max(20, 35 - reduce);
-                f.text("8", "Decimal amount", "0." + std::to_string(rate), "35% less 1% for each $2,000 (or part) of AGI over $15,000, but not below 20%");
+                const int rate = careRate(agi);
+                std::string rateHow = std::to_string(rules_.careTopRate) + "% less 1% for each $2,000 (or part) of AGI over $15,000, but not below " +
+                                      std::to_string(rules_.careMidRate) + "%";
+                if (!pick(rules_.careSecondStart, st_).isZero())
+                    rateHow += "; then less 1% for each " + usd(pick(rules_.careSecondStep, st_)) + " (or part) of AGI over " +
+                               usd(pick(rules_.careSecondStart, st_)) + ", but not below 20%";
+                f.text("8", "Decimal amount", "0." + std::to_string(rate), rateHow);
                 const Money l9 = f.add("9c", "Line 6 x line 8", pct(l6, rate));
                 const Money l10 = f.add("10", "Tax liability limit", line18);
                 careCredit_ = f.add("11", "Credit for child and dependent care expenses", minOf(l9, l10), "To Schedule 3, line 2");
@@ -1354,6 +1486,17 @@ private:
         f1040().add("20", "Amount from Schedule 3, line 8", sch3);
         const Money l21 = f1040().add("21", "Add lines 19 and 20", ctc_ + sch3);
         f1040().add("22", "Subtract line 21 from line 18", pos(line18 - l21));
+    }
+
+    // Form 2441 line 8, in whole percent.
+    int careRate(Money agi) const {
+        auto steps = [](Money over, Money step) {
+            return over.cents() <= 0 ? 0 : static_cast<int>((over.cents() + step.cents() - 1) / step.cents());
+        };
+        int rate = std::max(rules_.careMidRate, rules_.careTopRate - steps(agi - dollars(15000), dollars(2000)));
+        const Money second = pick(rules_.careSecondStart, st_);
+        if (!second.isZero() && agi > second) rate = std::max(20, rules_.careMidRate - steps(agi - second, pick(rules_.careSecondStep, st_)));
+        return rate;
     }
 
     std::ptrdiff_t iSch3_ = -1;
@@ -1447,7 +1590,7 @@ private:
             f.add(std::string("3") + col, ownerName(c.owner) + ": IRA contributions and elective deferrals", c.contributions);
             l7 += f.add(std::string("6") + col, ownerName(c.owner) + ": smaller of line 5 or $2,000", minOf(c.contributions, rules_.saverContributionLimit));
         }
-        diag(Severity::Info, "Saver's credit", "If you took retirement distributions in 2023-2025 (or before your 2025 filing date), subtract them on Form 8880 line 4; OpenTax doesn't track them.");
+        diag(Severity::Info, "Saver's credit", "If you took retirement distributions in " + yr(-2) + "-" + yr() + " (or before your " + yr() + " filing date), subtract them on Form 8880 line 4; OpenTax doesn't track them.");
         f.add("7", "Add the amounts on line 6", l7);
         f.add("8", "Adjusted gross income", agi);
         f.text("9", "Decimal amount", rate == 50 ? "0.5" : rate == 20 ? "0.2" : "0.1");
@@ -1506,7 +1649,9 @@ private:
             earlyHow += (earlyHow.empty() ? "" : "; ") + std::to_string(rate) + "% of " + usd(base) + " (" + x.payer + ")";
         }
 
-        // Form 8959
+        // Form 8959. In 2026 the wage part (line 12) goes to Schedule 2 line 17b and the
+        // self-employment part (line 18) to line 11; in 2025 the total (line 18) goes to line 11.
+        const bool y26 = rules_.formsYear >= 2026;
         Money medWages, medWithheld;
         for (const auto& w : r_.w2s) {
             if (!counts(w.owner)) continue;
@@ -1515,23 +1660,33 @@ private:
         }
         const Money seIncome = pos(seEarnings_[0] + (joint() ? seEarnings_[1] : kZero));
         const Money thresh = pick(rules_.medicareThreshold, st_);
-        Money addlMedicare;
+        Money medicareWagesTax, medicareSeTax;
         const Money l21 = pct(medWages, "1.45");
         const Money l22 = pos(medWithheld - l21);
         if (medWages > thresh || medWages + seIncome > thresh || !l22.isZero()) {
             Builder& f = begin("Form 8959", "Additional Medicare Tax", kOrder8959);
             const Money l1 = f.add("1", "Medicare wages (W-2 box 5)", medWages);
+            if (y26) f.add("4", "Add lines 1 through 3", l1);
             const Money l5 = f.add("5", "Threshold", thresh);
-            const Money l6 = f.add("6", "Subtract line 5 from line 1", pos(l1 - l5));
-            const Money l7 = f.add("7", "Line 6 x 0.9%", pct(l6, "0.9"));
-            Money l13;
+            const Money l6 = f.add("6", y26 ? "Subtract line 5 from line 4" : "Subtract line 5 from line 1", pos(l1 - l5));
+            medicareWagesTax = f.add("7", "Line 6 x 0.9%", pct(l6, "0.9"));
+            if (y26) f.add("12", "Additional Medicare Tax on wages", medicareWagesTax, "To Schedule 2, line 17b");
             if (!seIncome.isZero()) {
-                const Money l8 = f.add("8", "Self-employment income (Schedule SE line 6)", seIncome);
-                const Money l11 = f.add("11", "Threshold minus Medicare wages", pos(thresh - l1));
-                const Money l12 = f.add("12", "Subtract line 11 from line 8", pos(l8 - l11));
-                l13 = f.add("13", "Line 12 x 0.9%", pct(l12, "0.9"));
+                if (y26) {
+                    const Money l13 = f.add("13", "Self-employment income (Schedule SE line 6)", seIncome);
+                    const Money l14 = f.add("14", "Threshold", thresh);
+                    const Money l15 = f.add("15", "Amount from line 4", l1);
+                    const Money l16 = f.add("16", "Subtract line 15 from line 14", pos(l14 - l15));
+                    const Money l17 = f.add("17", "Subtract line 16 from line 13", pos(l13 - l16));
+                    medicareSeTax = f.add("18", "Additional Medicare Tax on self-employment income", pct(l17, "0.9"), "To Schedule 2, line 11");
+                } else {
+                    const Money l8 = f.add("8", "Self-employment income (Schedule SE line 6)", seIncome);
+                    const Money l11 = f.add("11", "Threshold minus Medicare wages", pos(thresh - l1));
+                    const Money l12 = f.add("12", "Subtract line 11 from line 8", pos(l8 - l11));
+                    medicareSeTax = f.add("13", "Line 12 x 0.9%", pct(l12, "0.9"));
+                }
             }
-            addlMedicare = f.add("18", "Additional Medicare Tax", l7 + l13, "To Schedule 2, line 11");
+            if (!y26) f.add("18", "Additional Medicare Tax", medicareWagesTax + medicareSeTax, "To Schedule 2, line 11");
             f.add("19", "Medicare tax withheld (W-2 box 6)", medWithheld);
             f.add("21", "Line 20 x 1.45% (regular Medicare tax)", l21);
             addlMedicareWithheld_ = f.add("24", "Additional Medicare Tax withholding", l22, "To Form 1040, line 25c");
@@ -1551,24 +1706,44 @@ private:
             const Money l14 = f.add("14", "Threshold", niiThresh);
             const Money l15 = f.add("15", "Subtract line 14 from line 13", pos(l13 - l14));
             const Money l16 = f.add("16", "Smaller of line 12 or line 15", minOf(l12, l15));
-            niit = f.add("17", "Net investment income tax (3.8%)", pct(l16, "3.8"), "To Schedule 2, line 12");
+            niit = f.add("17", "Net investment income tax (3.8%)", pct(l16, "3.8"), y26 ? "To Schedule 2, line 6" : "To Schedule 2, line 12");
         }
 
-        const Money total = se + early + addlMedicare + niit;
+        const Money total = se + early + medicareWagesTax + medicareSeTax + niit;
         if (!total.isZero()) {
             Builder& s2 = schedule2();
             if (!se.isZero()) s2.add("4", "Self-employment tax (Schedule SE)", se);
-            if (!early.isZero()) s2.add("8", "Additional tax on early distributions", early, earlyHow);
-            if (!addlMedicare.isZero()) s2.add("11", "Additional Medicare Tax (Form 8959)", addlMedicare);
-            if (!niit.isZero()) s2.add("12", "Net investment income tax (Form 8960)", niit);
+            if (y26) {
+                if (!early.isZero()) s2.add("5", "Additional tax on IRAs or other tax-favored accounts", early, earlyHow);
+                if (!niit.isZero()) s2.add("6", "Net investment income tax (Form 8960)", niit);
+                if (!medicareSeTax.isZero()) s2.add("11", "Additional Medicare Tax on self-employment income (Form 8959)", medicareSeTax);
+                s2.add("15", "Total additional income taxes", se + early + niit + medicareSeTax, "Add lines 4 through 11 and line 14");
+                if (!medicareWagesTax.isZero()) {
+                    s2.add("17b", "Additional Medicare Tax on Medicare wages (Form 8959)", medicareWagesTax);
+                    s2.add("17d", "Total other employment taxes", medicareWagesTax);
+                }
+                schedule2Line20_ = s2.add("20", "Total additional employment and other taxes", medicareWagesTax);
+            } else {
+                if (!early.isZero()) s2.add("8", "Additional tax on early distributions", early, earlyHow);
+                if (!medicareWagesTax.isZero() || !medicareSeTax.isZero())
+                    s2.add("11", "Additional Medicare Tax (Form 8959)", medicareWagesTax + medicareSeTax);
+                if (!niit.isZero()) s2.add("12", "Net investment income tax (Form 8960)", niit);
+            }
             s2.add("21", "Total other taxes", total, "To Form 1040, line 23");
         }
-        f1040().add("23", "Other taxes, including self-employment tax", total);
-        f1040().add("24", "Total tax", L("22") + total, "Add lines 22 and 23");
+        f1040().add("23", y26 ? "Additional taxes, including self-employment tax" : "Other taxes, including self-employment tax", total);
+        if (y26) {
+            const Money l24a = f1040().add("24a", "Total tax", L("22") + total, "Add lines 22 and 23");
+            f1040().add("24b", "Amount from Form 1062, line 15", kZero, "Deferred tax on qualified farmland sales (not supported)");
+            f1040().add("24c", "Add lines 24a and 24b", l24a);
+        } else {
+            f1040().add("24", "Total tax", L("22") + total, "Add lines 22 and 23");
+        }
     }
 
     // ------------------------------------------- payments and refundables
     Money eic_;
+    Money schedule2Line20_;
 
     void refundableCreditsAndPayments() {
         Money w2Withheld, form1099;
@@ -1589,7 +1764,7 @@ private:
         f1040().add("25c", "Withheld from other forms", addlMedicareWithheld_, addlMedicareWithheld_.isZero() ? "" : "Additional Medicare Tax withholding (Form 8959, line 24)");
         const Money withheld = f1040().add("25d", "Total federal income tax withheld", w2Withheld + form1099 + addlMedicareWithheld_);
         const Money est = r_.payments.estimated + r_.payments.priorYearApplied;
-        f1040().add("26", "2025 estimated tax payments and amount applied from 2024", est);
+        f1040().add("26", yr() + " estimated tax payments and amount applied from " + yr(-1) + " return", est);
 
         // Excess social security (Schedule 3, line 11).
         Money excessSs;
@@ -1622,8 +1797,38 @@ private:
             s3.add("15", "Total other payments and refundable credits", sch3b, "To Form 1040, line 31");
         }
         f1040().add("31", "Amount from Schedule 3, line 15", sch3b);
-        const Money l32 = f1040().add("32", "Total other payments and refundable credits", eic_ + actc + aotcRefundable_ + sch3b, "Add lines 27a, 28, 29, 30, and 31");
-        f1040().add("33", "Total payments", withheld + est + l32, "Add lines 25d, 26, and 32");
+        const Money refundable = eic_ + actc + aotcRefundable_ + sch3b;
+        if (!rules_.publicBenefitSchedule) {
+            const Money l32 = f1040().add("32", "Total other payments and refundable credits", refundable, "Add lines 27a, 28, 29, 30, and 31");
+            f1040().add("33", "Total payments", withheld + est + l32, "Add lines 25d, 26, and 32");
+            return;
+        }
+        const Money l32a = f1040().add("32a", "Total other payments and refundable credits", refundable, "Add lines 27a, 28, 29, 30, and 31");
+        const Money l32b = f1040().add("32b", "Amount from Schedule 3-A", publicBenefit(l32a, sch3b));
+        const Money l32c = f1040().add("32c", "Subtract line 32b from line 32a", l32a - l32b);
+        f1040().add("33", "Total payments", withheld + est + l32c, "Add lines 25d, 26, and 32c");
+    }
+
+    // Schedule 3-A (2026): the refunded part of the EIC, ACTC and American opportunity credit is
+    // a federal public benefit, which filers who aren't citizens, nationals or qualified aliens
+    // can't receive. Everyone claiming those credits attaches it.
+    Money publicBenefit(Money line32a, Money line31) {
+        if ((eic_ + aotcRefundable_ + L("28")).isZero()) return kZero;
+        Builder& f = begin("Schedule 3-A", "Federal Public Benefit", kOrderSch3);
+        const Money l1a = f.add("1a", "Form 1040, line 32a", line32a);
+        const Money l1b = f.add("1b", "Form 1040, line 31", line31);
+        const Money l2 = f.add("2", "Subtract line 1b from line 1a", l1a - l1b);
+        const Money l3 = f.add("3", "Form 1040, line 24a", L("24a"));
+        const Money l4 = f.add("4", "Schedule 2, line 20", schedule2Line20_);
+        const Money l5 = f.add("5", "Subtract line 4 from line 3", l3 - l4);
+        const Money l6 = f.add("6", "Federal public benefit", pos(l2 - l5), "The part of your refundable credits that is paid to you, beyond your income tax");
+        const bool eligible = r_.info.citizenOrQualifiedAlien;
+        f.text("8q", "U.S. citizen, U.S. national, or qualified alien?", eligible ? "Yes" : "No");
+        const Money l8 = f.add("8", "To Form 1040, line 32b", eligible ? kZero : l6);
+        if (!eligible && !l6.isZero())
+            diag(Severity::Warning, "Refundable credits", "Because neither you nor your spouse is a U.S. citizen, U.S. national or qualified alien, " +
+                                                              usd(l6) + " of refundable credits can't be paid to you (Schedule 3-A).");
+        return l8;
     }
 
     void earnedIncomeCredit() {
@@ -1709,13 +1914,14 @@ private:
 
     // ------------------------------------------------------------- finish
     void finish() {
-        const Money tax = L("24");
+        const LineIds& ids = lineIds(rules_.formsYear);
+        const Money tax = L(ids.totalTax);
         const Money paid = L("33");
         const Money over = pos(paid - tax);
         f1040().add("34", "Amount overpaid", over);
         const Money applied = minOf(r_.payments.applyToNextYear, over);
         f1040().add("35a", "Refund", over - applied);
-        f1040().add("36", "Applied to 2026 estimated tax", applied);
+        f1040().add("36", "Applied to " + yr(1) + " estimated tax", applied);
         f1040().add("37", "Amount you owe", pos(tax - paid));
 
         capitalLossCarryover();
@@ -1727,15 +1933,20 @@ private:
         s.itemized = itemize_;
         s.standardDeduction = standard_;
         s.itemizedDeduction = itemized_;
-        s.qbiDeduction = L("13a");
-        s.schedule1A = L("13b");
+        s.nonItemizerCharity = L("12f");
+        s.qbiDeduction = L(ids.qbi);
+        s.schedule1A = L(ids.schedule1A);
+        s.seniorDeduction = sch1ASenior_;
         s.taxableIncome = L("15");
         s.incomeTax = L("16");
+        s.amt = L("17");
         s.credits = L("19") + L("20");
         s.otherTaxes = L("23");
         s.totalTax = tax;
         s.withholding = L("25d");
-        s.refundableCredits = L("32");
+        s.estimatedPayments = L("26");
+        s.adjustments = L("10");
+        s.refundableCredits = L(ids.refundable);
         s.totalPayments = paid;
         s.overpaid = over;
         s.refund = over - applied;
@@ -1751,7 +1962,7 @@ private:
         const Money l2 = -capitalLine7_;
         const Money loss = -schD16_;
         if (loss <= l2 && L("15") > kZero) return;  // fully used
-        Builder& f = begin("Capital Loss Carryover", "Capital Loss Carryover Worksheet (to 2026)", kOrderWorksheet, true);
+        Builder& f = begin("Capital Loss Carryover", "Capital Loss Carryover Worksheet (to " + yr(1) + ")", kOrderWorksheet, true);
         // Line 1 uses taxable income, which may be negative before flooring at zero.
         const Money l1 = f.add("1", "Taxable income (may be negative)", L("11b") - L("14"));
         f.add("2", "Loss from Schedule D, line 21 (as a positive amount)", l2);
@@ -1760,14 +1971,14 @@ private:
         const Money l5 = f.add("5", "Short-term loss from Schedule D, line 7", pos(-schD7_));
         const Money l6 = f.add("6", "Long-term gain from Schedule D, line 15", pos(schD15_));
         const Money l7 = f.add("7", "Add lines 4 and 6", l4 + l6);
-        const Money l8 = f.add("8", "Short-term capital loss carryover to 2026", pos(l5 - l7));
+        const Money l8 = f.add("8", "Short-term capital loss carryover to " + yr(1), pos(l5 - l7));
         const Money l9 = f.add("9", "Long-term loss from Schedule D, line 15", pos(-schD15_));
         const Money l10 = f.add("10", "Short-term gain from Schedule D, line 7", pos(schD7_));
         const Money l11 = f.add("11", "Subtract line 5 from line 4", pos(l4 - l5));
         const Money l12 = f.add("12", "Add lines 10 and 11", l10 + l11);
-        const Money l13 = f.add("13", "Long-term capital loss carryover to 2026", pos(l9 - l12));
+        const Money l13 = f.add("13", "Long-term capital loss carryover to " + yr(1), pos(l9 - l12));
         if (!(l8 + l13).isZero())
-            diag(Severity::Info, "Capital losses", "You have " + usd(l8 + l13) + " of capital losses to carry over to 2026 (" + usd(l8) + " short-term, " + usd(l13) + " long-term).");
+            diag(Severity::Info, "Capital losses", "You have " + usd(l8 + l13) + " of capital losses to carry over to " + yr(1) + " (" + usd(l8) + " short-term, " + usd(l13) + " long-term).");
     }
 
     const TaxReturn& r_;
@@ -1779,10 +1990,16 @@ private:
 
 }  // namespace
 
+const LineIds& lineIds(int year) {
+    static const LineIds y2025{"", "13a", "13b", "24", "32", "37", "38"};
+    static const LineIds y2026{"12f", "13b", "13a", "24c", "32c", "43", "44"};
+    return year >= 2026 ? y2026 : y2025;
+}
+
 Result calculate(const TaxReturn& r) {
     if (!isSupportedYear(r.info.year)) {
         Result result;
-        result.diagnostics.push_back({Severity::Error, "Tax year", "Tax year " + std::to_string(r.info.year) + " isn't supported. This version of OpenTax prepares 2025 returns."});
+        result.diagnostics.push_back({Severity::Error, "Tax year", "Tax year " + std::to_string(r.info.year) + " isn't supported. This version of OpenTax prepares 2025 and 2026 returns."});
         return result;
     }
     return Calculator(r).run();

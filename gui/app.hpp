@@ -8,6 +8,7 @@
 // is saved as soon as no field is being edited, so work is never lost.
 
 #include "opentax/calc.hpp"
+#include "opentax/crypto.hpp"
 #include "opentax/model.hpp"
 
 #include <chrono>
@@ -52,10 +53,14 @@ struct ConfirmRequest {
 };
 
 struct NewReturnForm {
+    int year = 2025;
     std::string first;
     std::string last;
     std::string path;
     ot::FilingStatus status = ot::FilingStatus::Single;
+    bool encrypt = false;
+    std::string password;
+    std::string confirm;
     std::string error;
 };
 
@@ -71,7 +76,14 @@ public:
 
 private:
     // ---- persistence (app.cpp)
-    bool openReturn(const std::string& path);
+    // Paths are taken by value: callers often pass an element of recent_, which
+    // rememberRecent() reorders.
+    // Opens a return. An encrypted one asks for its password first, so this returns false
+    // and finishOpen() runs once it's unlocked.
+    bool openReturn(std::string path);
+    void finishOpen(std::string path, ot::TaxReturn r, std::optional<ot::PasswordKey> key);
+    void startSetPassword();
+    void drawPasswordModals();
     void closeReturn();
     bool createReturn(const NewReturnForm& form);
     void changed();  // the working return was edited
@@ -79,8 +91,12 @@ private:
     void recalculate();
     void loadConfig();
     void saveConfig() const;
-    void rememberRecent(const std::string& path);
+    void rememberRecent(std::string path);
     void chooseOpenFile();
+    void drawFrame();
+    // Rules for the open return's year (2025 rules if the file names an unsupported year).
+    const ot::Rules& rules() const;
+    std::string yearText(int offset = 0) const;
 
     // ---- chrome (app.cpp)
     void drawMenuBar();
@@ -127,6 +143,15 @@ private:
     bool dirty_ = false;
     std::chrono::steady_clock::time_point lastChange_;
     std::string saveError_;
+    std::optional<ot::PasswordKey> key_;  // set while the open return is encrypted
+    std::string unlockPath_;
+    std::string unlockPassword_;
+    std::string unlockError_;
+    std::string newPassword_;
+    std::string confirmPassword_;
+    std::string passwordError_;
+    bool refocusPassword_ = false;
+    bool rememberRecentFiles_ = true;
 
     Step step_ = Step::Home;
     IncomeKind income_ = IncomeKind::Hub;

@@ -1,5 +1,6 @@
 #include "opentax/model.hpp"
 
+#include "opentax/crypto.hpp"
 #include "opentax/util.hpp"
 
 #include <filesystem>
@@ -57,7 +58,7 @@ template <>
 const Schema<ReturnInfo>& schema<ReturnInfo>() {
     using T = ReturnInfo;
     static const Schema<T> s{"INFO", "info", "Return", {
-        F(T, "year", "Tax year", "Only 2025 is supported by this version.", year),
+        F(T, "year", "Tax year", "2025 or 2026.", year),
         F(T, "status", "Filing status", "", status),
         F(T, "street", "Street address", "", street),
         F(T, "city", "City", "", city),
@@ -67,6 +68,7 @@ const Schema<ReturnInfo>& schema<ReturnInfo>() {
         F(T, "spouseitemizes", "Spouse itemizes deductions", "Married filing separately only. If your spouse itemizes, your standard deduction is zero.", spouseItemizes),
         F(T, "eicseparated", "Separated from spouse for EIC", "Married filing separately only. You lived apart from your spouse for the last 6 months of the year (or are legally separated) and have a qualifying child.", separatedForEic),
         F(T, "forceitemize", "Itemize even if smaller", "Use Schedule A even when the standard deduction is larger (for example, to match a state return).", forceItemize),
+        F(T, "citizen", "U.S. citizen, national or qualified alien", "You (or your spouse, if filing jointly) are a U.S. citizen, U.S. national or qualified alien. From 2026, others can't receive the refunded part of the EIC, ACTC and American opportunity credit (Schedule 3-A).", citizenOrQualifiedAlien),
     }};
     return s;
 }
@@ -83,7 +85,7 @@ const Schema<Person>& schema<Person>() {
         F(T, "student", "Full-time student", "Enrolled full-time for part of 5 months of the year. Affects the saver's credit.", fullTimeStudent),
         F(T, "ssn", "Has an SSN valid for work", "Required for the senior, tips and overtime deductions and the EIC.", hasValidSsn),
         F(T, "occupation", "Occupation", "", occupation),
-        F(T, "tradira", "Traditional IRA contributions", "Contributions for 2025, including those made by April 15, 2026.", traditionalIra),
+        F(T, "tradira", "Traditional IRA contributions", "Contributions for the tax year, including those made by the filing deadline (April 15 of the next year).", traditionalIra),
         F(T, "rothira", "Roth IRA contributions", "Used for the saver's credit only.", rothIra),
     }};
     return s;
@@ -101,7 +103,7 @@ const Schema<Dependent>& schema<Dependent>() {
         F(T, "student", "Full-time student", "", fullTimeStudent),
         F(T, "disabled", "Permanently disabled", "", permanentlyDisabled),
         F(T, "ssn", "Has an SSN valid for work", "Needed for the child tax credit and EIC. Otherwise the $500 credit for other dependents may apply.", hasValidSsn),
-        F(T, "care", "Care expenses paid", "Child or dependent care paid in 2025 so you (and your spouse) could work or look for work.", careExpenses),
+        F(T, "care", "Care expenses paid", "Child or dependent care paid during the year so you (and your spouse) could work or look for work.", careExpenses),
     }};
     return s;
 }
@@ -206,6 +208,7 @@ const Schema<Business>& schema<Business>() {
         F(T, "wages", "26  Wages paid", "", wagesPaid),
         F(T, "other", "27a  Other expenses", "", otherExpenses),
         F(T, "homeoffice", "30  Home office square feet", "Simplified method: $5 per square foot, up to 300 square feet, limited to the business's profit.", homeOfficeSqFt),
+        F(T, "active", "Materially participated", "You worked in the business regularly, continuously and substantially (most self-employed people do). From 2026, active businesses with at least $1,000 of QBI get a QBI deduction of at least $400.", materialParticipation),
     }};
     return s;
 }
@@ -274,8 +277,8 @@ template <>
 const Schema<Adjustments>& schema<Adjustments>() {
     using T = Adjustments;
     static const Schema<T> s{"ADJUSTMENTS", "adjustments", "Adjustments", {
-        F(T, "educator", "Educator expenses (you)", "K-12 teachers and aides: up to $300.", educatorTaxpayer),
-        F(T, "educatorspouse", "Educator expenses (spouse)", "Up to $300. Joint returns only.", educatorSpouse),
+        F(T, "educator", "Educator expenses (you)", "K-12 teachers and aides: up to $300 for 2025, $350 for 2026.", educatorTaxpayer),
+        F(T, "educatorspouse", "Educator expenses (spouse)", "Up to $300 for 2025, $350 for 2026. Joint returns only.", educatorSpouse),
         F(T, "hsa", "HSA deduction", "Your own contributions to a health savings account (Form 8889, line 13). Don't include employer contributions (W-2 code W).", hsa),
         F(T, "sehealth", "Self-employed health insurance", "Premiums for you, your spouse and dependents, if you had self-employment income and no subsidized employer plan.", seHealthInsurance),
         F(T, "sep", "SEP, SIMPLE and qualified plans", "Your contributions to your own self-employed retirement plan.", sepSimple),
@@ -290,7 +293,7 @@ const Schema<Itemized>& schema<Itemized>() {
     using T = Itemized;
     static const Schema<T> s{"ITEMIZED", "itemized", "Itemized deductions", {
         F(T, "medical", "Medical and dental expenses", "Unreimbursed. Only the part above 7.5% of AGI counts.", medical),
-        F(T, "stateincome", "State/local income tax paid", "Other than W-2 box 17, which is added automatically: estimated payments and balances paid in 2025.", stateIncomeTax),
+        F(T, "stateincome", "State/local income tax paid", "Other than W-2 box 17, which is added automatically: estimated payments and balances paid during the year.", stateIncomeTax),
         F(T, "usesales", "Deduct sales tax instead", "Use general sales taxes instead of income taxes.", useSalesTax),
         F(T, "salestax", "General sales taxes", "", salesTax),
         F(T, "realestate", "Real estate taxes", "", realEstateTax),
@@ -298,8 +301,9 @@ const Schema<Itemized>& schema<Itemized>() {
         F(T, "othertaxes", "Other taxes", "", otherTaxes),
         F(T, "mortgage", "Home mortgage interest (1098)", "Form 1098 box 1. If your mortgage is over $750,000, enter only the deductible part.", mortgageInterest),
         F(T, "points", "Points (1098)", "Form 1098 box 6.", mortgagePoints),
+        F(T, "mortgageins", "Mortgage insurance premiums (1098)", "Form 1098 box 5. Deductible from 2026, reduced when AGI is over $100,000 ($50,000 if married filing separately).", mortgageInsurance),
         F(T, "investint", "Investment interest", "Limited to net investment income.", investmentInterest),
-        F(T, "charitycash", "Gifts by cash or check", "", charityCash),
+        F(T, "charitycash", "Gifts by cash or check", "From 2026, if you don't itemize you can still deduct up to $1,000 ($2,000 joint) of cash gifts to public charities (not donor-advised funds). Itemized gifts count only above 0.5% of AGI.", charityCash),
         F(T, "charitynoncash", "Gifts other than cash", "Fair market value of donated goods.", charityNoncash),
         F(T, "charitycarry", "Charity carryover from prior year", "", charityCarryover),
         F(T, "other", "Other itemized deductions", "Gambling losses (up to winnings), and other items on the Schedule A line 16 list.", otherItemized),
@@ -311,10 +315,10 @@ template <>
 const Schema<Payments>& schema<Payments>() {
     using T = Payments;
     static const Schema<T> s{"PAYMENTS", "payments", "Payments", {
-        F(T, "estimated", "2025 estimated tax payments", "Total of your Form 1040-ES payments.", estimated),
-        F(T, "prioryear", "Applied from 2024 return", "Overpayment from last year you applied to 2025.", priorYearApplied),
+        F(T, "estimated", "Estimated tax payments", "Total of your Form 1040-ES payments for the tax year.", estimated),
+        F(T, "prioryear", "Applied from last year's return", "Overpayment from last year's return that you applied to this year.", priorYearApplied),
         F(T, "extension", "Paid with extension", "Amount paid with Form 4868.", extension),
-        F(T, "applynext", "Apply to 2026 estimated tax", "Part of your refund to keep with the IRS for next year.", applyToNextYear),
+        F(T, "applynext", "Apply to next year's estimated tax", "Part of your refund to keep with the IRS for next year.", applyToNextYear),
     }};
     return s;
 }
@@ -322,10 +326,10 @@ const Schema<Payments>& schema<Payments>() {
 template <>
 const Schema<Carryovers>& schema<Carryovers>() {
     using T = Carryovers;
-    static const Schema<T> s{"CARRYOVERS", "carryovers", "Carryovers from 2024", {
-        F(T, "stloss", "Short-term capital loss carryover", "From your 2024 Capital Loss Carryover Worksheet, line 8.", shortTermLoss),
-        F(T, "ltloss", "Long-term capital loss carryover", "From your 2024 Capital Loss Carryover Worksheet, line 13.", longTermLoss),
-        F(T, "qbiloss", "QBI net loss carryforward", "From your 2024 Form 8995, line 16.", qbiLoss),
+    static const Schema<T> s{"CARRYOVERS", "carryovers", "Carryovers from last year", {
+        F(T, "stloss", "Short-term capital loss carryover", "From last year's Capital Loss Carryover Worksheet, line 8.", shortTermLoss),
+        F(T, "ltloss", "Long-term capital loss carryover", "From last year's Capital Loss Carryover Worksheet, line 13.", longTermLoss),
+        F(T, "qbiloss", "QBI net loss carryforward", "From last year's Form 8995: line 16 on the 2024 and 2025 forms, line 18 from 2026.", qbiLoss),
     }};
     return s;
 }
@@ -566,23 +570,50 @@ TaxReturn TaxReturn::parse(std::string_view text) {
     return r;
 }
 
-void TaxReturn::save(const std::string& path) const {
+namespace {
+
+std::string readFile(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw Error("cannot open '" + path.u8string() + "'");
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+bool fileIsEncrypted(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    char head[32] = {};
+    in.read(head, sizeof head);
+    return isEncryptedText(std::string_view(head, static_cast<std::size_t>(in.gcount())));
+}
+
+}  // namespace
+
+void TaxReturn::save(const std::string& path, const PasswordKey* key) const {
     const fs::path target = fs::u8path(path);
     fs::path tmp = target;
     tmp += ".tmp";
+    fs::path backup = target;
+    backup += ".bak";
     {
+        std::string text = serialize();
+        const std::string contents = key ? encryptText(text, *key) : text;
+        wipeString(text);
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) throw Error("cannot write '" + tmp.u8string() + "'");
-        out << serialize();
+        out << contents;
         out.flush();
         if (!out) throw Error("failed while writing '" + tmp.u8string() + "'");
     }
     std::error_code ec;
     if (fs::exists(target, ec)) {
-        fs::path backup = target;
-        backup += ".bak";
-        fs::copy_file(target, backup, fs::copy_options::overwrite_existing, ec);
+        // Keep the previous version as a backup, except that an encrypted return never gets
+        // an unencrypted backup: the old plain file is not copied, and an old plain backup
+        // is removed.
+        if (key && !fileIsEncrypted(target)) fs::remove(backup, ec);
+        else fs::copy_file(target, backup, fs::copy_options::overwrite_existing, ec);
     }
+    if (key && fs::exists(backup, ec) && !fileIsEncrypted(backup)) fs::remove(backup, ec);
     fs::rename(tmp, target, ec);
     if (ec) {  // some platforms refuse to rename over an existing file
         fs::remove(target, ec);
@@ -592,13 +623,22 @@ void TaxReturn::save(const std::string& path) const {
     }
 }
 
-TaxReturn TaxReturn::load(const std::string& path) {
-    std::ifstream in(fs::u8path(path), std::ios::binary);
-    if (!in) throw Error("cannot open '" + path + "'");
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return parse(buffer.str());
+TaxReturn TaxReturn::load(const std::string& path, std::string_view password, PasswordKey* keyOut) {
+    std::string text = readFile(fs::u8path(path));
+    if (!isEncryptedText(text)) return parse(text);
+    if (password.empty()) throw PasswordRequired();
+    std::string plain = decryptText(text, password, keyOut);
+    try {
+        TaxReturn r = parse(plain);
+        wipeString(plain);
+        return r;
+    } catch (...) {
+        wipeString(plain);
+        throw;
+    }
 }
+
+bool TaxReturn::isEncryptedFile(const std::string& path) { return fileIsEncrypted(fs::u8path(path)); }
 
 std::string TaxReturn::displayName() const {
     std::string tp = trim(taxpayer.first + " " + taxpayer.last);

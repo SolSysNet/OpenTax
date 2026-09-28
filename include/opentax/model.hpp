@@ -24,6 +24,8 @@ struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+class PasswordKey;  // crypto.hpp
+
 // ------------------------------------------------------------------ enums
 
 enum class FilingStatus { Single, MarriedJoint, MarriedSeparate, HeadOfHousehold, QualifyingSurvivingSpouse };
@@ -62,6 +64,7 @@ struct ReturnInfo {
     bool spouseItemizes = false;      // MFS only: spouse itemizes on a separate return
     bool separatedForEic = false;     // MFS only: separated / apart last 6 months (EIC)
     bool forceItemize = false;        // itemize even when the standard deduction is larger
+    bool citizenOrQualifiedAlien = true;  // you or your spouse (2026 Schedule 3-A)
 };
 
 struct Person {
@@ -166,6 +169,7 @@ struct Business {
     Money wagesPaid;            // 26
     Money otherExpenses;        // 27a
     int homeOfficeSqFt = 0;     // simplified method, line 30
+    bool materialParticipation = true;  // active business (2026 minimum QBI deduction)
 };
 
 struct Retirement1099R {
@@ -223,6 +227,7 @@ struct Itemized {
     Money otherTaxes;
     Money mortgageInterest;     // Form 1098 box 1
     Money mortgagePoints;       // Form 1098 box 6
+    Money mortgageInsurance;    // Form 1098 box 5 (deductible from 2026)
     Money investmentInterest;
     Money charityCash;
     Money charityNoncash;
@@ -231,14 +236,14 @@ struct Itemized {
 };
 
 struct Payments {
-    Money estimated;            // 2025 estimated tax payments
-    Money priorYearApplied;     // overpayment applied from the 2024 return
+    Money estimated;            // estimated tax payments for the year
+    Money priorYearApplied;     // overpayment applied from last year's return
     Money extension;            // paid with an extension request
-    Money applyToNextYear;      // part of the refund to apply to 2026 estimated tax
+    Money applyToNextYear;      // part of the refund to apply to next year's estimated tax
 };
 
 struct Carryovers {
-    Money shortTermLoss;        // capital loss carryover from 2024 (positive number)
+    Money shortTermLoss;        // capital loss carryover from last year (positive number)
     Money longTermLoss;
     Money qbiLoss;              // qualified business net loss carryforward (positive number)
 };
@@ -343,9 +348,13 @@ struct TaxReturn {
     std::string serialize() const;
     static TaxReturn parse(std::string_view text);
 
-    // Atomic save (write temp, keep .bak, rename) and load.
-    void save(const std::string& path) const;
-    static TaxReturn load(const std::string& path);
+    // Atomic save (write temp, keep .bak, rename). With a key the file is encrypted (see
+    // crypto.hpp), and no unencrypted backup is left beside it.
+    void save(const std::string& path, const PasswordKey* key = nullptr) const;
+    // Loads a plain or encrypted file. An encrypted file needs `password` (PasswordRequired
+    // is thrown without one, WrongPassword if it's wrong); `keyOut` then receives its key.
+    static TaxReturn load(const std::string& path, std::string_view password = {}, PasswordKey* keyOut = nullptr);
+    static bool isEncryptedFile(const std::string& path);
 };
 
 // Calls f(schema, vector) for every repeated record type, in file order.

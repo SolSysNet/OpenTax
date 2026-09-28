@@ -6,11 +6,15 @@
 
 #include "opentax/calc.hpp"
 #include "opentax/cli.hpp"
+#include "opentax/crypto.hpp"
 #include "opentax/model.hpp"
 #include "opentax/pdf.hpp"
 #include "opentax/report.hpp"
 #include "opentax/return_pdf.hpp"
 
+#include "monocypher.h"
+
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -981,6 +985,520 @@ TEST(cli_end_to_end) {
     CHECK(out.find("Box 1") != std::string::npos);
     CHECK_EQ(cli({"-f", file, "bogus"}), 2);
     CHECK_EQ(cli({"--version"}, &out), 0);
+    fs::remove_all(dir);
+}
+
+
+// ------------------------------------------------------------- 2026
+
+const Rules& R26() { return rulesFor(2026); }
+
+TaxReturn single26(const char* wages, const char* withheld = "0") {
+    TaxReturn r = single(wages, withheld);
+    r.info.year = 2026;
+    return r;
+}
+
+TEST(y2026_rate_schedules_match_rev_proc) {
+    // Rev. Proc. 2025-32 section 4.01: the tax at the top of each bracket.
+    const FilingStatus S = FilingStatus::Single, J = FilingStatus::MarriedJoint, H = FilingStatus::HeadOfHousehold,
+                       MS = FilingStatus::MarriedSeparate;
+    CHECK_EQ(incomeTax(M("105700"), S, R26()), M("17966.00"));
+    CHECK_EQ(incomeTax(M("201775"), S, R26()), M("41024.00"));
+    CHECK_EQ(incomeTax(M("256225"), S, R26()), M("58448.00"));
+    CHECK_EQ(incomeTax(M("640600"), S, R26()), M("192979.25"));
+    CHECK_EQ(incomeTax(M("100800"), J, R26()), M("11600.00"));
+    CHECK_EQ(incomeTax(M("211400"), J, R26()), M("35932.00"));
+    CHECK_EQ(incomeTax(M("403550"), J, R26()), M("82048.00"));
+    CHECK_EQ(incomeTax(M("512450"), J, R26()), M("116896.00"));
+    CHECK_EQ(incomeTax(M("768700"), J, R26()), M("206583.50"));
+    CHECK_EQ(incomeTax(M("105700"), H, R26()), M("16155.00"));
+    CHECK_EQ(incomeTax(M("201750"), H, R26()), M("39207.00"));
+    CHECK_EQ(incomeTax(M("256200"), H, R26()), M("56631.00"));
+    CHECK_EQ(incomeTax(M("640600"), H, R26()), M("191171.00"));
+    CHECK_EQ(incomeTax(M("384350"), MS, R26()), M("103291.75"));
+    CHECK_EQ(incomeTax(M("800000"), J, R26()), M("218164.50"));  // 206,583.50 + 37% x 31,300
+    // Below $100,000 the Tax Table method: row 43,900-43,950, midpoint 43,925.
+    CHECK_EQ(incomeTax(M("43900"), S, R26()), M("5023"));  // 1,240 + 12% x 31,525 = 5,023
+}
+
+TEST(y2026_eic_table) {
+    CHECK_EQ(eicTable(M("20000"), 3, false, R26()), M("8231"));   // plateau
+    CHECK_EQ(eicTable(M("45000"), 1, false, R26()), M("1050"));   // 4,427 - 15.98% x 21,135
+    CHECK_EQ(eicTable(M("15000"), 0, false, R26()), M("345"));    // 664 - 7.65% x 4,165
+    CHECK_EQ(eicTable(M("1"), 1, false, R26()), M("9"));
+    CHECK_EQ(eicTable(M("51600"), 1, false, R26()), Money());     // past the $51,593 phase-out end
+}
+
+TEST(y2026_simple_single) {
+    const Result r = calculate(single26("60000", "6000"));
+    CHECK(!r.hasErrors());
+    CHECK_EQ(r.summary.deduction, M("16100"));
+    CHECK_EQ(r.summary.taxableIncome, M("43900"));
+    CHECK_EQ(r.summary.incomeTax, M("5023"));
+    CHECK_EQ(r.summary.refund, M("977"));
+    // 2026 layout: 24a/24c and 32a/32c.
+    CHECK(r.form("1040")->find("24c") != nullptr);
+    CHECK(r.form("1040")->find("24") == nullptr);
+    CHECK_EQ(r.line("1040", "24c"), M("5023"));
+    CHECK(r.form("1040")->find("32c") != nullptr);
+}
+
+TEST(y2026_standard_deduction_seniors) {
+    TaxReturn t = single26("50000");
+    t.taxpayer.birthDate = D("1961-06-01");  // born before January 2, 1962
+    Result r = calculate(t);
+    CHECK_EQ(r.summary.deduction, M("18150"));  // 16,100 + 2,050
+    CHECK_EQ(r.line("Schedule 1-A", "43"), M("6000"));
+    CHECK_EQ(r.line("Schedule 1-A", "44"), M("6000"));
+    CHECK_EQ(r.line("1040", "13a"), M("6000"));  // Schedule 1-A is line 13a in 2026
+    CHECK_EQ(r.summary.seniorDeduction, M("6000"));
+    // The same birth date is 64 at the end of 2025.
+    t.info.year = 2025;
+    CHECK_EQ(calculate(t).summary.seniorDeduction, Money());
+}
+
+TEST(y2026_schedule_1a_line_numbers) {
+    TaxReturn t = single26("160500");
+    t.w2s[0].qualifiedTips = M("10000");
+    t.w2s[0].qualifiedOvertime = M("5000");
+    t.adjustments.carLoanInterest = M("5000");
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Schedule 1-A", "14"), M("1000"));  // floor(10.5) x 100
+    CHECK_EQ(r.line("Schedule 1-A", "15"), M("9000"));
+    CHECK_EQ(r.line("Schedule 1-A", "27"), M("4000"));
+    CHECK_EQ(r.line("Schedule 1-A", "35"), M("12200"));  // ceil(60.5) x 200
+    CHECK_EQ(r.line("Schedule 1-A", "36"), Money());
+    CHECK_EQ(r.line("Schedule 1-A", "44"), M("13000"));
+}
+
+TEST(y2026_non_itemizer_charity) {
+    TaxReturn t = single26("60000");
+    t.itemized.charityCash = M("1500");
+    Result r = calculate(t);
+    CHECK(!r.summary.itemized);
+    CHECK_EQ(r.line("1040", "12f"), M("1000"));
+    CHECK_EQ(r.summary.taxableIncome, M("42900"));
+    t.info.status = FilingStatus::MarriedJoint;
+    t.spouse.first = "Sam";
+    t.itemized.charityCash = M("2500");
+    r = calculate(t);
+    CHECK_EQ(r.line("1040", "12f"), M("2000"));
+    // Not available in 2025.
+    t.info.year = 2025;
+    CHECK(calculate(t).form("1040")->find("12f") == nullptr);
+}
+
+TEST(y2026_itemized_charity_floor_and_salt) {
+    TaxReturn t = single26("200000");
+    t.itemized.realEstateTax = M("30000");
+    t.itemized.stateIncomeTax = M("20000");
+    t.itemized.mortgageInterest = M("20000");
+    t.itemized.charityCash = M("5000");
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Schedule A", "5e"), M("40400"));
+    CHECK_EQ(r.line("Schedule A", "13"), M("4000"));  // 5,000 - 0.5% of 200,000
+    CHECK_EQ(r.line("Schedule A", "18"), M("64400"));
+    CHECK(r.summary.itemized);
+    CHECK_EQ(r.summary.deduction, M("64400"));
+    TaxReturn high = single26("525000");
+    high.itemized.realEstateTax = M("50000");
+    CHECK_EQ(calculate(high).line("Schedule A", "5e"), M("34400"));  // 40,400 - 30% x 20,000
+}
+
+TEST(y2026_itemized_limitation_37_percent) {
+    TaxReturn t = single26("800000");
+    t.itemized.realEstateTax = M("20000");
+    t.itemized.mortgageInterest = M("30000");
+    t.itemized.charityCash = M("50000");
+    const Result r = calculate(t);
+    // SALT floors at 10,000; charity 50,000 - 4,000; total 86,000.
+    CHECK_EQ(r.line("Itemized Deduction Limitation", "1"), M("86000"));
+    CHECK_EQ(r.line("Itemized Deduction Limitation", "4"), M("159400"));  // 800,000 - 640,600
+    CHECK_EQ(r.line("Itemized Deduction Limitation", "6"), M("4648.65"));  // 86,000 x 2/37
+    CHECK_EQ(r.summary.deduction, M("81351.35"));
+    CHECK_EQ(r.line("Schedule A", "18"), M("81351.35"));
+    CHECK_EQ(r.summary.taxableIncome, M("718648.65"));
+}
+
+TEST(y2026_mortgage_insurance) {
+    TaxReturn t = single26("105500");
+    t.itemized.mortgageInsurance = M("1000");
+    t.itemized.mortgageInterest = M("20000");
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Schedule A", "8d"), M("400"));  // 6 x 10% reduction
+    t.info.year = 2025;
+    const Result r25 = calculate(t);
+    CHECK(r25.form("Schedule A")->find("8d") == nullptr);
+}
+
+TEST(y2026_dependent_care_rates) {
+    TaxReturn t = single26("40000");
+    t.info.status = FilingStatus::HeadOfHousehold;
+    Dependent d = child("Tot", "2022-01-01");
+    d.careExpenses = M("5000");
+    t.dependents.push_back(d);
+    Result r = calculate(t);
+    CHECK_EQ(r.form("Form 2441")->find("8")->text, std::string("0.37"));
+    CHECK_EQ(r.line("Form 2441", "9c"), M("1110"));
+    t.w2s[0].wages = M("60000");
+    CHECK_EQ(calculate(t).form("Form 2441")->find("8")->text, std::string("0.35"));
+    t.w2s[0].wages = M("80000");
+    CHECK_EQ(calculate(t).form("Form 2441")->find("8")->text, std::string("0.32"));
+    t.w2s[0].wages = M("120000");
+    CHECK_EQ(calculate(t).form("Form 2441")->find("8")->text, std::string("0.20"));
+    t.info.status = FilingStatus::MarriedJoint;
+    t.spouse.first = "Sam";
+    t.w2s[0].wages = M("100000");
+    t.w2s.push_back(w2("60000", "0", Owner::Spouse));
+    CHECK_EQ(calculate(t).form("Form 2441")->find("8")->text, std::string("0.32"));  // 160,000 joint
+}
+
+TEST(y2026_dependent_care_benefit_exclusion) {
+    TaxReturn t = single26("50000");
+    t.info.status = FilingStatus::HeadOfHousehold;
+    t.w2s[0].dependentCare = M("7500");
+    Dependent d = child("Tot", "2022-01-01");
+    d.careExpenses = M("8000");
+    t.dependents.push_back(d);
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Form 2441 Part III", "21"), M("7500"));
+    CHECK_EQ(r.line("Form 2441 Part III", "26"), Money());
+}
+
+TEST(y2026_qbi_minimum_deduction) {
+    TaxReturn t = single26("50000");
+    Business b;
+    b.name = "Side";
+    b.receipts = M("1500");
+    t.businesses.push_back(b);
+    Result r = calculate(t);
+    CHECK_EQ(r.line("Schedule SE (Pat)", "13"), M("105.97"));
+    CHECK_EQ(r.line("Form 8995", "15"), M("278.81"));  // 20% of 1,394.03
+    CHECK_EQ(r.line("Form 8995", "16"), M("400"));
+    CHECK_EQ(r.line("Form 8995", "17"), M("400"));
+    CHECK_EQ(r.line("1040", "13b"), M("400"));  // QBI is line 13b in 2026
+    CHECK_EQ(r.summary.qbiDeduction, M("400"));
+    t.businesses[0].materialParticipation = false;
+    CHECK_EQ(calculate(t).summary.qbiDeduction, M("278.81"));
+    t.businesses[0].materialParticipation = true;
+    t.info.year = 2025;
+    CHECK_EQ(calculate(t).summary.qbiDeduction, M("278.81"));
+}
+
+TEST(y2026_ira_phaseout) {
+    TaxReturn t = single26("86000");
+    t.w2s[0].retirementPlan = true;
+    t.taxpayer.traditionalIra = M("7500");
+    CHECK_EQ(calculate(t).line("Schedule 1", "20"), M("3750"));  // 7,500 x 5,000 / 10,000
+    TaxReturn j = single26("139000");
+    j.info.status = FilingStatus::MarriedJoint;
+    j.spouse.first = "Sam";
+    j.taxpayer.birthDate = D("1970-03-03");
+    j.w2s[0].retirementPlan = true;
+    j.taxpayer.traditionalIra = M("8600");
+    CHECK_EQ(calculate(j).line("Schedule 1", "20"), M("4300"));  // 8,600 x 10,000 / 20,000
+}
+
+TEST(y2026_student_loan_joint_phaseout) {
+    TaxReturn t = single26("190000");
+    t.info.status = FilingStatus::MarriedJoint;
+    t.spouse.first = "Sam";
+    t.adjustments.studentLoanInterest = M("2500");
+    const Result r = calculate(t);
+    CHECK_EQ(r.form("Student Loan Interest Worksheet")->find("7")->text, std::string("0.500"));  // 15,000 / 30,000
+    CHECK_EQ(r.line("Schedule 1", "21"), M("1250"));
+}
+
+TEST(y2026_self_employment_wage_base) {
+    TaxReturn t = single26("180000");
+    Business b;
+    b.name = "Side";
+    b.receipts = M("20000");
+    t.businesses.push_back(b);
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Schedule SE (Pat)", "9"), M("4500"));  // 184,500 - 180,000
+    CHECK_EQ(r.line("Schedule SE (Pat)", "10"), M("558"));
+}
+
+TEST(y2026_schedule_2_and_8959_routing) {
+    TaxReturn t = single26("250000");
+    t.w2s[0].medicareWithheld = M("4075");
+    Interest1099 i;
+    i.interest = M("10000");
+    t.interest.push_back(i);
+    const Result r = calculate(t);
+    CHECK_EQ(r.line("Form 8959", "12"), M("450"));
+    CHECK_EQ(r.line("Schedule 2", "17b"), M("450"));
+    CHECK_EQ(r.line("Schedule 2", "20"), M("450"));
+    CHECK_EQ(r.line("Schedule 2", "6"), M("380"));   // NIIT moved to line 6
+    CHECK_EQ(r.line("Schedule 2", "21"), M("830"));
+    CHECK_EQ(r.line("1040", "25c"), M("450"));
+}
+
+TEST(y2026_schedule_3a_public_benefit) {
+    TaxReturn t = single26("20000", "500");
+    t.info.status = FilingStatus::HeadOfHousehold;
+    t.dependents.push_back(child("Riley", "2018-01-10"));
+    Result r = calculate(t);
+    CHECK_EQ(r.line("1040", "27a"), M("4427"));
+    CHECK_EQ(r.line("1040", "28"), M("1700"));
+    CHECK_EQ(r.line("1040", "32a"), M("6127"));
+    CHECK_EQ(r.line("Schedule 3-A", "6"), M("6127"));
+    CHECK_EQ(r.line("1040", "32b"), Money());
+    CHECK_EQ(r.summary.refund, M("6627"));
+    t.info.citizenOrQualifiedAlien = false;
+    r = calculate(t);
+    CHECK_EQ(r.line("1040", "32b"), M("6127"));
+    CHECK_EQ(r.line("1040", "32c"), Money());
+    CHECK_EQ(r.summary.refund, M("500"));
+}
+
+TEST(y2026_ctc_and_amt_phaseout_rules) {
+    TaxReturn t = single26("90000");
+    t.info.status = FilingStatus::HeadOfHousehold;
+    t.dependents.push_back(child("A", "2015-01-01"));
+    CHECK_EQ(calculate(t).line("1040", "19"), M("2200"));
+    CHECK_EQ(R26().amtPhasePercent, Decimal::fromInt(50));
+    // AMT exemption fully phased out at 500,000 + 2 x 90,100 = 680,200 (Rev. Proc. 2025-32).
+    const Money phasedOut = R26().amtPhaseStart[0] + multiply(R26().amtExemption[0], Decimal::fromInt(2));
+    CHECK_EQ(phasedOut, M("680200"));
+    TaxReturn rich = single26("1000000");
+    CHECK_EQ(calculate(rich).line("1040", "17"), Money());
+}
+
+TEST(y2026_unsupported_years) {
+    TaxReturn t = single26("50000");
+    t.info.year = 2027;
+    CHECK(calculate(t).hasErrors());
+    CHECK(isSupportedYear(2026));
+    CHECK(!isSupportedYear(2024));
+}
+
+TEST(y2026_cli) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "opentax_test_cli26";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string file = (dir / "r26.otx").u8string();
+    std::string out;
+    CHECK_EQ(cli({"-f", file, "new", "year=2026", "first=Pat", "dob=1985-06-15"}, &out), 0);
+    CHECK(out.find("2026") != std::string::npos);
+    CHECK_EQ(cli({"-f", file, "add", "w2", "wages=60000", "fedwh=6000"}, &out), 0);
+    CHECK_EQ(cli({"-f", file, "summary"}, &out), 0);
+    CHECK(out.find("Federal refund $977.00") != std::string::npos);
+    CHECK_EQ(cli({"-f", (dir / "bad.otx").u8string(), "new", "year=2027"}, &out), 1);
+    fs::remove_all(dir);
+}
+
+
+// ------------------------------------------------------------ encryption
+
+// Light settings keep the tests fast; real files use the 256 MiB default.
+const KdfParams kTestKdf{8 * 1024, 1, 1};
+
+std::string toHex(const std::uint8_t* data, std::size_t size) {
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    for (std::size_t i = 0; i < size; ++i) {
+        out += digits[data[i] >> 4];
+        out += digits[data[i] & 15];
+    }
+    return out;
+}
+
+TEST(crypto_argon2id_rfc9106_vector) {
+    // RFC 9106 section 5.3 (Argon2id): t=3, m=32 KiB, p=4, with a secret and associated data.
+    std::uint8_t pass[32], salt[16], secret[8], ad[12], tag[32];
+    std::memset(pass, 1, sizeof pass);
+    std::memset(salt, 2, sizeof salt);
+    std::memset(secret, 3, sizeof secret);
+    std::memset(ad, 4, sizeof ad);
+    std::vector<std::uint8_t> work(32 * 1024);
+    crypto_argon2_config config{CRYPTO_ARGON2_ID, 32, 3, 4};
+    crypto_argon2_inputs inputs{pass, salt, sizeof pass, sizeof salt};
+    crypto_argon2_extras extras{secret, ad, sizeof secret, sizeof ad};
+    crypto_argon2(tag, sizeof tag, work.data(), config, inputs, extras);
+    CHECK_EQ(toHex(tag, sizeof tag), std::string("0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"));
+}
+
+TEST(crypto_round_trip) {
+    const PasswordKey key = PasswordKey::fromNewPassword("correct horse battery", kTestKdf);
+    const std::string secret = "OPENTAX 1\nTAXPAYER\tfirst=Pat\n";
+    const std::string file = encryptText(secret, key);
+    CHECK(isEncryptedText(file));
+    CHECK(file.rfind("OPENTAX-ENCRYPTED 1\nkdf=argon2id memory=8192 passes=1 lanes=1 salt=", 0) == 0);
+    CHECK(file.find("Pat") == std::string::npos);
+    PasswordKey back;
+    CHECK_EQ(decryptText(file, "correct horse battery", &back), secret);
+    CHECK(back.key() == key.key());
+    CHECK(back.salt() == key.salt());
+    // A fresh nonce each time: the same text encrypts differently, and both decrypt.
+    const std::string again = encryptText(secret, key);
+    CHECK(again != file);
+    CHECK_EQ(decryptText(again, "correct horse battery"), secret);
+    // Line endings converted by an editor or git still open.
+    std::string crlf;
+    for (char ch : file) {
+        if (ch == '\n') crlf += '\r';
+        crlf += ch;
+    }
+    CHECK_EQ(decryptText(crlf, "correct horse battery"), secret);
+    // Empty and non-ASCII contents.
+    CHECK_EQ(decryptText(encryptText("", key), "correct horse battery"), std::string());
+    const PasswordKey unicode = PasswordKey::fromNewPassword("pässwörd-😀-steuer", kTestKdf);
+    CHECK_EQ(decryptText(encryptText("é", unicode), "pässwörd-😀-steuer"), std::string("é"));
+}
+
+TEST(crypto_rejects_wrong_password_and_tampering) {
+    const PasswordKey key = PasswordKey::fromNewPassword("correct horse battery", kTestKdf);
+    const std::string file = encryptText("OPENTAX 1\nINFO\tstatus=mfj\n", key);
+    bool wrong = false;
+    try {
+        decryptText(file, "Correct horse battery");
+    } catch (const WrongPassword&) {
+        wrong = true;
+    }
+    CHECK(wrong);
+    // Flip one character of the ciphertext.
+    std::string tampered = file;
+    const std::size_t body = tampered.find('\n', tampered.find("nonce=")) + 1;
+    tampered[body + 5] = tampered[body + 5] == 'A' ? 'B' : 'A';
+    CHECK_THROWS(decryptText(tampered, "correct horse battery"));
+    // Change the authenticated header (same values, but a different nonce).
+    std::string header = file;
+    const std::size_t n = header.find("nonce=") + 6;
+    header[n] = header[n] == '0' ? '1' : '0';
+    CHECK_THROWS(decryptText(header, "correct horse battery"));
+    // Truncated, garbled or unreasonable files are refused with an error.
+    CHECK_THROWS(decryptText(file.substr(0, file.size() / 2), "correct horse battery"));
+    CHECK_THROWS(decryptText("OPENTAX-ENCRYPTED 1\n", "x"));
+    std::string weak = file;
+    weak.replace(weak.find("memory=8192"), 11, "memory=1024");
+    CHECK_THROWS(decryptText(weak, "correct horse battery"));
+    std::string huge = file;
+    huge.replace(huge.find("memory=8192"), 11, "memory=99999999");
+    CHECK_THROWS(decryptText(huge, "correct horse battery"));
+    std::string algo = file;
+    algo.replace(algo.find("argon2id"), 8, "argon2i ");
+    CHECK_THROWS(decryptText(algo, "correct horse battery"));
+}
+
+TEST(crypto_password_rules) {
+    CHECK(!passwordProblem("short").empty());
+    CHECK(!passwordProblem("seven77").empty());
+    CHECK(passwordProblem("eight888").empty());
+    CHECK_THROWS(PasswordKey::fromNewPassword("short", kTestKdf));
+    std::uint8_t a[32] = {}, b[32] = {};
+    secureRandom(a, sizeof a);
+    secureRandom(b, sizeof b);
+    CHECK(std::memcmp(a, b, sizeof a) != 0);
+    std::string pw = "secret password";
+    wipeString(pw);
+    CHECK(pw.empty());
+}
+
+TEST(crypto_encrypted_return_files) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "opentax_test_crypto";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string path = (dir / "r.otx").u8string();
+    TaxReturn t = fullReturn();
+    t.save(path);  // plain
+    t.save(path);  // plain, with a plain .bak
+    CHECK(!TaxReturn::isEncryptedFile(path + ".bak"));
+
+    const PasswordKey key = PasswordKey::fromNewPassword("correct horse battery", kTestKdf);
+    t.save(path, &key);
+    CHECK(TaxReturn::isEncryptedFile(path));
+    // The unencrypted backup is gone, and no plain copy of the old file was made.
+    CHECK(!fs::exists(path + ".bak"));
+    {
+        std::ifstream raw(path, std::ios::binary);  // closed before the next save (Windows can't replace open files)
+        const std::string contents((std::istreambuf_iterator<char>(raw)), std::istreambuf_iterator<char>());
+        CHECK(contents.find("Pat") == std::string::npos);
+    }
+
+    bool required = false;
+    try {
+        TaxReturn::load(path);
+    } catch (const PasswordRequired&) {
+        required = true;
+    }
+    CHECK(required);
+    CHECK_THROWS(TaxReturn::load(path, "wrong password"));
+    PasswordKey opened;
+    const TaxReturn back = TaxReturn::load(path, "correct horse battery", &opened);
+    CHECK_EQ(back.serialize(), t.serialize());
+
+    // Saving again with the key from opening keeps it encrypted, and the backup is encrypted.
+    t.taxpayer.first = "Changed";
+    t.save(path, &opened);
+    CHECK(TaxReturn::isEncryptedFile(path + ".bak"));
+    CHECK_EQ(TaxReturn::load(path, "correct horse battery").taxpayer.first, std::string("Changed"));
+    CHECK_EQ(TaxReturn::load(path + ".bak", "correct horse battery").taxpayer.first, std::string("Pat"));
+
+    // Removing the password writes a plain file again.
+    t.save(path);
+    CHECK(!TaxReturn::isEncryptedFile(path));
+    CHECK_EQ(TaxReturn::load(path).taxpayer.first, std::string("Changed"));
+    fs::remove_all(dir);
+}
+
+TEST(crypto_cli) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "opentax_test_crypto_cli";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string file = (dir / "c.otx").u8string();
+    std::string typed = "correct horse battery";
+    int asked = 0;
+    const PasswordPrompt prompt = [&](const std::string&) {
+        ++asked;
+        return typed;
+    };
+    auto run = [&](std::vector<std::string> args, std::string* output = nullptr) {
+        std::ostringstream out, err;
+        const int code = runCli(args, out, err, prompt);
+        if (output) *output = out.str() + err.str();
+        return code;
+    };
+    std::string out;
+    CHECK_EQ(run({"-f", file, "new", "first=Pat", "--encrypt"}, &out), 0);
+    CHECK(TaxReturn::isEncryptedFile(file));
+    CHECK_EQ(asked, 2);  // new password and confirmation
+    CHECK_EQ(run({"-f", file, "add", "w2", "wages=60000", "fedwh=6000"}, &out), 0);
+    CHECK(TaxReturn::isEncryptedFile(file));  // saving keeps it encrypted
+    CHECK_EQ(run({"-f", file, "summary"}, &out), 0);
+    CHECK(out.find("Federal refund $925.00") != std::string::npos);
+
+    typed = "not the password";
+    CHECK_EQ(run({"-f", file, "summary"}, &out), 1);
+    CHECK(out.find("wrong password") != std::string::npos);
+    typed = "";
+    CHECK_EQ(run({"-f", file, "summary"}, &out), 1);
+
+    // Change the password: the prompt answers the current one, then the new one twice.
+    std::vector<std::string> answers = {"correct horse battery", "a new pass phrase", "a new pass phrase"};
+    std::size_t next = 0;
+    const PasswordPrompt sequence = [&](const std::string&) { return answers[next++]; };
+    std::ostringstream o, e;
+    CHECK_EQ(runCli({"-f", file, "encrypt"}, o, e, sequence), 0);
+    CHECK(TaxReturn::load(file, "a new pass phrase").w2s.size() == 1);
+
+    typed = "a new pass phrase";
+    CHECK_EQ(run({"-f", file, "decrypt"}, &out), 0);
+    CHECK(!TaxReturn::isEncryptedFile(file));
+    CHECK_EQ(run({"-f", file, "decrypt"}, &out), 1);  // not encrypted any more
+
+    // Mismatched confirmation and weak passwords are refused.
+    answers = {"first password", "second password"};
+    next = 0;
+    CHECK_EQ(runCli({"-f", file, "encrypt"}, o, e, sequence), 1);
+    typed = "short";
+    CHECK_EQ(run({"-f", file, "encrypt"}, &out), 1);
+    CHECK(!TaxReturn::isEncryptedFile(file));
     fs::remove_all(dir);
 }
 

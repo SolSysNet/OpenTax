@@ -107,7 +107,8 @@ void App::drawReview() {
     ui::EndCard();
     ImGui::Dummy(ImVec2(0, fs * 0.6f));
 
-    ui::SubHeading("Your 2025 tax summary");
+    ui::SubHeading(("Your " + yearText() + " tax summary").c_str());
+    const LineIds& ids = lineIds(ret_->info.year);
     ui::BeginCard("##summary", width);
     struct Row {
         const char* label;
@@ -120,17 +121,18 @@ void App::drawReview() {
         {"Adjustments to income", -result_.line("1040", "10"), false, "10"},
         {"Adjusted gross income", s.agi, true, "11a"},
         {s.itemized ? "Itemized deductions" : "Standard deduction", -s.deduction, false, "12e"},
-        {"Qualified business income deduction", -s.qbiDeduction, false, "13a"},
-        {"Schedule 1-A deductions", -s.schedule1A, false, "13b"},
+        {"Charitable deduction for non-itemizers", -s.nonItemizerCharity, false, ids.charity},
+        {"Schedule 1-A deductions", -s.schedule1A, false, ids.schedule1A},
+        {"Qualified business income deduction", -s.qbiDeduction, false, ids.qbi},
         {"Taxable income", s.taxableIncome, true, "15"},
         {"Income tax", s.incomeTax, false, "16"},
         {"Alternative minimum tax", result_.line("1040", "17"), false, "17"},
         {"Nonrefundable credits", -s.credits, false, "21"},
         {"Other taxes", s.otherTaxes, false, "23"},
-        {"Total tax", s.totalTax, true, "24"},
+        {"Total tax", s.totalTax, true, ids.totalTax},
         {"Withholding", -s.withholding, false, "25d"},
         {"Estimated and other payments", -result_.line("1040", "26"), false, "26"},
-        {"Refundable credits", -s.refundableCredits, false, "32"},
+        {"Refundable credits", -s.refundableCredits, false, ids.refundable},
     };
     if (ImGui::BeginTable("##waterfall", 3, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch, 3.0f);
@@ -178,8 +180,13 @@ void App::drawReview() {
     ImGui::TextUnformatted(("Forms on your return: " + forms).c_str());
     ImGui::Spacing();
     ImGui::TextUnformatted("1.  Save the PDF. It has every form, schedule and worksheet, line by line, with explanations.");
-    ImGui::TextUnformatted("2.  Copy the amounts onto the official 2025 IRS forms: IRS Free File Fillable Forms online, or paper forms from irs.gov.");
-    ImGui::TextUnformatted("3.  Sign and file. 2025 returns were due April 15, 2026; with an extension, the deadline is October 15, 2026.");
+    const std::string y = yearText();
+    const std::string next = yearText(1);
+    ImGui::TextUnformatted(("2.  Copy the amounts onto the official " + y + " IRS forms: IRS Free File Fillable Forms online, or paper forms from irs.gov.").c_str());
+    ImGui::TextUnformatted(("3.  Sign and file. " + y + " returns are due April 15, " + next + "; with an extension, October 15, " + next + ".").c_str());
+    if (ret_->info.year >= 2026)
+        ui::Muted("The official 2026 forms and instructions come out in early 2027. This return uses the IRS's 2026 inflation "
+                  "adjustments and draft forms; a few new 2026 worksheets aren't published yet, and those lines are marked provisional.");
     ui::Muted("OpenTax doesn't e-file and doesn't compute state returns or the underpayment penalty (Form 2210).");
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
@@ -293,7 +300,7 @@ void App::exportPdf(bool preview) {
         }
         if (auto path = saveFileDialog("Save your return as PDF", {"PDF files (*.pdf)", "*.pdf"}, "pdf", returnPdfFileName(*ret_))) {
             writeFile(*path, returnPdfBytes());
-            notify("Saved " + fs::u8path(*path).filename().u8string());
+            notify("Saved " + fs::u8path(*path).filename().u8string() + (key_ ? " (the PDF isn't encrypted)" : ""));
         }
     } catch (const std::exception& e) {
         notify(e.what(), true);
@@ -312,7 +319,7 @@ void App::exportCsv() {
         }
         if (auto path = saveFileDialog("Export every line as CSV", {"CSV files (*.csv)", "*.csv"}, "csv", name)) {
             writeFile(*path, renderCsv(result_));
-            notify("Saved " + fs::u8path(*path).filename().u8string());
+            notify("Saved " + fs::u8path(*path).filename().u8string() + (key_ ? " (the CSV isn't encrypted)" : ""));
         }
     } catch (const std::exception& e) {
         notify(e.what(), true);

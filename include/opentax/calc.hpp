@@ -46,15 +46,20 @@ struct Summary {
     bool itemized = false;
     Money standardDeduction;  // what the standard deduction would be
     Money itemizedDeduction;  // Schedule A total (zero if not computed)
-    Money qbiDeduction;       // line 13a
-    Money schedule1A;         // line 13b
+    Money nonItemizerCharity; // line 12f (2026 and later)
+    Money qbiDeduction;       // line 13a (2025) / 13b (2026)
+    Money schedule1A;         // line 13b (2025) / 13a (2026)
+    Money seniorDeduction;    // part of schedule1A
     Money taxableIncome;      // line 15
     Money incomeTax;          // line 16
+    Money amt;                // line 17 (Schedule 2, line 2)
     Money credits;            // lines 19 + 20
     Money otherTaxes;         // line 23
-    Money totalTax;           // line 24
+    Money totalTax;           // line 24 (2025) / 24c (2026)
     Money withholding;        // line 25d
-    Money refundableCredits;  // line 32
+    Money estimatedPayments;  // line 26
+    Money adjustments;        // line 10
+    Money refundableCredits;  // line 32 (2025) / 32c (2026)
     Money totalPayments;      // line 33
     Money overpaid;           // line 34
     Money refund;             // line 35a
@@ -72,6 +77,18 @@ struct Result {
 };
 
 Result calculate(const TaxReturn& r);
+
+// Form 1040 line numbers that moved between years.
+struct LineIds {
+    const char* charity;       // non-itemizer charitable deduction ("" before 2026)
+    const char* qbi;           // "13a" (2025), "13b" (2026)
+    const char* schedule1A;    // "13b" (2025), "13a" (2026)
+    const char* totalTax;      // "24" (2025), "24c" (2026)
+    const char* refundable;    // "32" (2025), "32c" (2026)
+    const char* sch1ASenior;   // Schedule 1-A enhanced senior deduction: "37" (2025), "43" (2026)
+    const char* sch1ATotal;    // Schedule 1-A total: "38" (2025), "44" (2026)
+};
+const LineIds& lineIds(int year);
 
 // Tax on ordinary taxable income: the Tax Table below $100,000 (tax at the midpoint of the
 // $25/$50 row, rounded to whole dollars) and the Tax Computation Worksheet above.

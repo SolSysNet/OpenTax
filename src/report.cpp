@@ -71,6 +71,7 @@ std::string renderSummary(const TaxReturn& r, const Result& result) {
         {"Total income", s.totalIncome},
         {"Adjusted gross income", s.agi},
         {s.itemized ? "Itemized deductions" : "Standard deduction", s.deduction},
+        {"Charitable deduction (non-itemizers)", s.nonItemizerCharity},
         {"QBI deduction", s.qbiDeduction},
         {"Schedule 1-A deductions", s.schedule1A},
         {"Taxable income", s.taxableIncome},

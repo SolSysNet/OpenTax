@@ -18,9 +18,9 @@ namespace {
 
 bool is(const char* key, const char* name) { return std::strcmp(key, name) == 0; }
 
-std::string ageText(const std::optional<Date>& dob) {
+std::string ageText(const std::optional<Date>& dob, int year) {
     if (!dob) return "no birth date";
-    return "age " + std::to_string(ageAtEndOfYear(*dob, 2025));
+    return "age " + std::to_string(ageAtEndOfYear(*dob, year));
 }
 
 template <class T, class F>
@@ -122,7 +122,7 @@ void App::drawHome() {
     const float fs = ImGui::GetFontSize();
     TaxReturn& r = *ret_;
     const std::string first = trim(r.taxpayer.first);
-    ui::Heading(first.empty() ? "Your 2025 tax return" : ("Welcome, " + first).c_str());
+    ui::Heading(first.empty() ? ("Your " + yearText() + " tax return").c_str() : ("Welcome, " + first).c_str());
     ui::Muted("Work through each step. Your refund updates as you go, and everything saves automatically.");
     sectionGap();
 
@@ -189,18 +189,34 @@ void App::drawAboutYou() {
     ui::Muted("Your filing status and a few personal details decide your tax rates and standard deduction.");
     sectionGap();
 
+    ui::SubHeading("Tax year");
+    ImGui::Spacing();
+    for (int y : {2025, 2026}) {
+        if (y != 2025) ImGui::SameLine();
+        if (ImGui::RadioButton(std::to_string(y).c_str(), r.info.year == y)) {
+            r.info.year = y;
+            changed();
+        }
+    }
+    ImGui::SameLine();
+    ui::Muted(r.info.year == 2026 ? "  Uses 2026 inflation adjustments and draft IRS forms." : "  The return you file in 2026.");
+    sectionGap();
+
     ui::SubHeading("Filing status");
     ImGui::Spacing();
     struct StatusHelp {
         FilingStatus status;
         const char* help;
     };
+    const std::string singleHelp = "Unmarried, divorced, or legally separated on December 31, " + yearText() + ".";
+    const std::string qssHelp = "Your spouse died in " + yearText(-2) + " or " + yearText(-1) +
+                                ", you haven't remarried, and a dependent child lives with you.";
     const StatusHelp statuses[] = {
-        {FilingStatus::Single, "Unmarried, divorced, or legally separated on December 31, 2025."},
+        {FilingStatus::Single, singleHelp.c_str()},
         {FilingStatus::MarriedJoint, "Married on December 31 and filing one return together. Usually the lowest total tax."},
         {FilingStatus::MarriedSeparate, "Married, each filing your own return. Often costs more, and several credits aren't allowed."},
         {FilingStatus::HeadOfHousehold, "Unmarried, and you paid more than half the cost of a home for a qualifying person who lived with you."},
-        {FilingStatus::QualifyingSurvivingSpouse, "Your spouse died in 2023 or 2024, you haven't remarried, and a dependent child lives with you."},
+        {FilingStatus::QualifyingSurvivingSpouse, qssHelp.c_str()},
     };
     const float width = std::min(ImGui::GetContentRegionAvail().x, fs * 46.0f);
     ui::BeginCard("##status", width);
@@ -263,14 +279,14 @@ void App::drawDependents() {
         "Children and relatives you support. Each qualifying child under 17 is worth up to $2,200 (child tax credit); "
         "other dependents up to $500. Children also count toward the earned income credit and head of household status.",
         ret_->dependents, "Add a dependent",
-        [](const Dependent& d) {
+        [year = ret_->info.year](const Dependent& d) {
             std::string name = trim(d.first + " " + d.last);
             if (name.empty()) return std::string();
             std::string rel = choiceLabel(d.relationship);
             rel = rel.substr(0, rel.find(','));
-            const bool ctc = d.birthDate && ageAtEndOfYear(*d.birthDate, 2025) < 17 && d.monthsLivedWithYou >= 7 &&
+            const bool ctc = d.birthDate && ageAtEndOfYear(*d.birthDate, year) < 17 && d.monthsLivedWithYou >= 7 &&
                              d.hasValidSsn && d.relationship != Relationship::Parent && d.relationship != Relationship::OtherRelative;
-            return name + "  -  " + rel + ", " + ageText(d.birthDate) + (ctc ? "  -  child tax credit" : "  -  other dependent");
+            return name + "  -  " + rel + ", " + ageText(d.birthDate, year) + (ctc ? "  -  child tax credit" : "  -  other dependent");
         },
         {});
     if (editing_ < 0) stepFooter(Step::AboutYou, Step::Income);
@@ -295,7 +311,7 @@ void App::drawIncome() {
         case IncomeKind::Wages:
             drawList<W2>("Wages (Form W-2)",
                          "Enter each W-2 you received. Box 12 deferrals and box 13 affect your IRA deduction and saver's credit. "
-                         "New for 2025: enter qualified tips and overtime here to deduct them on Schedule 1-A.",
+                         "Enter qualified tips and overtime here to deduct them on Schedule 1-A.",
                          r.w2s, "Add a W-2",
                          [](const W2& w) { return w.employer; }, [](const W2& w) { return w.wages; });
             break;
@@ -359,7 +375,7 @@ void App::drawIncomeHub() {
     const float fs = ImGui::GetFontSize();
     TaxReturn& r = *ret_;
     ui::Heading("Income");
-    ui::Muted("Choose the kinds of income you had in 2025. Most people only need W-2s.");
+    ui::Muted(("Choose the kinds of income you had in " + yearText() + ". Most people only need W-2s.").c_str());
     sectionGap();
 
     Money business;
@@ -447,12 +463,14 @@ void App::drawDeductions() {
         compare = "The standard deduction (" + ui::usd(s.standardDeduction) + ") is more than your itemized deductions (" +
                   ui::usd(s.itemizedDeduction) + "), so OpenTax uses it.";
     }
+    if (!s.nonItemizerCharity.isZero())
+        compare += " You also get " + ui::usd(s.nonItemizerCharity) + " for cash gifts to charity (line 12f), available from 2026 to people who don't itemize.";
     ui::Callout(compare.c_str(), colorAccent());
     sectionGap();
 
     const float width = std::min(ImGui::GetContentRegionAvail().x, fs * 46.0f);
 
-    ui::SubHeading("New for 2025: Schedule 1-A deductions");
+    ui::SubHeading("Schedule 1-A: tips, overtime, car loan and senior deductions");
     ui::BeginCard("##1a", width);
     Money tips, overtime;
     for (const auto& w : r.w2s) {
@@ -468,11 +486,12 @@ void App::drawDeductions() {
     }
     if (ui::RecordEditor("##car", r.adjustments, schema<Adjustments>(), [](const char* k) { return !is(k, "carloan"); }))
         changed();
-    const Money senior = result_.line("Schedule 1-A", "37");
+    const Money senior = s.seniorDeduction;
     ImGui::Text("Enhanced deduction for seniors (65+): %s", ui::usd(senior).c_str());
     ImGui::SameLine();
-    ui::HelpMarker("Up to $6,000 for each spouse born before January 2, 1961, reduced by 6% of modified AGI over $75,000 "
-                   "($150,000 joint). Married couples must file jointly. Set birth dates under About you.");
+    ui::HelpMarker(("Up to $6,000 for each spouse born before January 2, " + yearText(-64) +
+                    ", reduced by 6% of modified AGI over $75,000 ($150,000 joint). Married couples must file jointly. "
+                    "Set birth dates under About you.").c_str());
     ImGui::Separator();
     ImGui::Text("Total Schedule 1-A deductions (line 13b): %s", ui::usd(s.schedule1A).c_str());
     ui::EndCard();
@@ -492,7 +511,9 @@ void App::drawDeductions() {
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Traditional IRA (you)");
         ImGui::SameLine();
-        ui::HelpMarker("Contributions for 2025, up to $7,000 ($8,000 if 50 or older). If you're covered by a workplace plan, the deduction phases out with income.");
+        ui::HelpMarker(("Contributions for " + yearText() + ", up to " + ui::usd(rules().iraLimit) + " (" +
+                        ui::usd(rules().iraLimit + rules().iraCatchUp) +
+                        " if 50 or older). If you're covered by a workplace plan, the deduction phases out with income.").c_str());
         ImGui::TableSetColumnIndex(1);
         if (ui::MoneyInput("##iratp", r.taxpayer.traditionalIra, fs * 10)) changed();
         if (r.info.status == FilingStatus::MarriedJoint) {
@@ -514,8 +535,11 @@ void App::drawDeductions() {
     ImGui::SetNextItemOpen(open, ImGuiCond_Once);
     if (ImGui::CollapsingHeader("Itemized deductions (Schedule A)")) {
         ui::BeginCard("##itemized", width);
-        ui::MutedWrapped("State income tax withheld on your W-2s (box 17) is included automatically. State and local taxes are "
-                         "capped at $40,000 for 2025 ($20,000 if married filing separately), lower above $500,000 of income.");
+        const std::string saltNote = "State income tax withheld on your W-2s (box 17) is included automatically. State and local taxes are capped at " +
+                                     ui::usd(rules().saltCap) + " for " + yearText() + " (half if married filing separately), lower above " +
+                                     ui::usd(rules().saltPhaseStart) + " of income." +
+                                     (ret_->info.year >= 2026 ? " From 2026, charitable gifts count only above 0.5% of AGI, and mortgage insurance premiums are deductible again." : "");
+        ui::MutedWrapped(saltNote.c_str());
         ImGui::Spacing();
         if (ui::RecordEditor("##items", r.itemized, schema<Itemized>(), [&](const char* k) {
                 if (is(k, "salestax")) return !r.itemized.useSalesTax;
@@ -608,7 +632,7 @@ void App::drawCredits() {
             ImGui::TableSetColumnIndex(0);
             ImGui::AlignTextToFramePadding();
             const std::string name = trim(d.first + " " + d.last);
-            ImGui::Text("%s (%s)", name.empty() ? "Dependent" : name.c_str(), ageText(d.birthDate).c_str());
+            ImGui::Text("%s (%s)", name.empty() ? "Dependent" : name.c_str(), ageText(d.birthDate, r.info.year).c_str());
             ImGui::TableSetColumnIndex(1);
             if (ui::MoneyInput("##care", d.careExpenses, fs * 10)) changed();
             ImGui::PopID();
@@ -720,7 +744,7 @@ void App::drawPayments() {
     ui::EndCard();
     sectionGap();
 
-    ui::SubHeading("Carryovers from 2024");
+    ui::SubHeading(("Carryovers from " + yearText(-1)).c_str());
     ui::BeginCard("##carry", width);
     if (ui::RecordEditor("##co", r.carryovers, schema<Carryovers>())) changed();
     ui::EndCard();

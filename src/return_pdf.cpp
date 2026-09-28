@@ -183,7 +183,7 @@ std::string returnPdf(const TaxReturn& r, const Result& result, const ReturnPdfO
     w.page().text(w.left() + 16, y - 32, formatUsd(refund ? s.refund : s.owed), Font::Bold, 24,
                   refund ? kPositive : owe ? kNegative : kInk);
     if (!s.overpaid.isZero() && s.overpaid != s.refund)
-        w.page().text(w.right() - 16, y - 32, formatUsd(s.overpaid - s.refund) + " applied to 2026 estimated tax",
+        w.page().text(w.right() - 16, y - 32, formatUsd(s.overpaid - s.refund) + " applied to " + std::to_string(r.info.year + 1) + " estimated tax",
                       Font::Regular, 9.5, kMuted, Align::Right);
     y -= 72;
 
@@ -192,21 +192,29 @@ std::string returnPdf(const TaxReturn& r, const Result& result, const ReturnPdfO
         Money amount;
         bool bold;
     };
+    const LineIds& ids = lineIds(r.info.year);
+    auto lineLabel = [](const char* text, const char* line) { return std::string(text) + " (line " + line + ")"; };
+    const std::string charityLabel = lineLabel("Charitable deduction for non-itemizers", ids.charity);
+    const std::string qbiLabel = lineLabel("Qualified business income deduction", ids.qbi);
+    const std::string sch1ALabel = lineLabel("Schedule 1-A deductions", ids.schedule1A);
+    const std::string totalTaxLabel = lineLabel("Total tax", ids.totalTax);
+    const std::string refundableLabel = lineLabel("Refundable credits and other payments", ids.refundable);
     const Row rows[] = {
         {"Total income (line 9)", s.totalIncome, false},
         {"Adjustments to income (line 10)", s.totalIncome - s.agi, false},
         {"Adjusted gross income (line 11a)", s.agi, true},
         {s.itemized ? "Itemized deductions (line 12e)" : "Standard deduction (line 12e)", s.deduction, false},
-        {"Qualified business income deduction (line 13a)", s.qbiDeduction, false},
-        {"Schedule 1-A deductions (line 13b)", s.schedule1A, false},
+        {charityLabel.c_str(), s.nonItemizerCharity, false},
+        {sch1ALabel.c_str(), s.schedule1A, false},
+        {qbiLabel.c_str(), s.qbiDeduction, false},
         {"Taxable income (line 15)", s.taxableIncome, true},
         {"Tax (line 16) and AMT (line 17)", s.incomeTax + result.line("1040", "17"), false},
         {"Nonrefundable credits (lines 19-20)", s.credits, false},
         {"Other taxes (line 23)", s.otherTaxes, false},
-        {"Total tax (line 24)", s.totalTax, true},
+        {totalTaxLabel.c_str(), s.totalTax, true},
         {"Federal income tax withheld (line 25d)", s.withholding, false},
         {"Estimated payments (line 26)", result.line("1040", "26"), false},
-        {"Refundable credits and other payments (line 32)", s.refundableCredits, false},
+        {refundableLabel.c_str(), s.refundableCredits, false},
         {"Total payments (line 33)", s.totalPayments, true},
     };
     bool band = false;

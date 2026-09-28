@@ -99,6 +99,11 @@ struct Rules {
     ByStatus<Money> studentLoanPhaseRange;
     Money iraLimit;
     Money iraCatchUp;
+    // IRA deduction phase-out (IRA Deduction Worksheet line 2): where the deduction reaches zero
+    // for an active plan participant, and for a joint filer whose spouse is the participant.
+    // The phase-out range is $10,000, or $20,000 for a participant filing jointly or as QSS.
+    ByStatus<Money> iraPhaseEnd;
+    Money iraPhaseEndSpouseCovered;
 
     // Schedule 1-A.
     Money tipsLimit;
@@ -119,6 +124,13 @@ struct Rules {
     Money careLimitTwo;
     Money careBenefitExclusion;
     Money careBenefitExclusionMfs;
+    // Credit rate (Form 2441 line 8): starts at careTopRate and drops 1 point per $2,000 (or part)
+    // of AGI over $15,000, down to careMidRate; then, above careSecondStart, 1 point per
+    // careSecondStep (or part), down to 20%.
+    int careTopRate;
+    int careMidRate;
+    ByStatus<Money> careSecondStart;  // zero = no second phase-down
+    ByStatus<Money> careSecondStep;
 
     // Saver's credit (Form 8880).
     std::vector<SaverTier> saverTiers;
@@ -126,12 +138,25 @@ struct Rules {
 
     // QBI deduction (Form 8995).
     ByStatus<Money> qbiThreshold;
+    Money qbiMinimumDeduction;  // Form 8995 line 16 (zero before 2026)
+    Money qbiMinimumActive;     // active QBI needed for the minimum deduction
 
     // Alternative minimum tax (Form 6251).
     ByStatus<Money> amtExemption;
     ByStatus<Money> amtPhaseStart;
     ByStatus<Money> amt28Threshold;
     ByStatus<Money> amt28Subtract;
+    Decimal amtPhasePercent;    // exemption reduction per dollar of AMTI over the threshold
+
+    // Charitable contributions.
+    ByStatus<Money> nonItemizerCharity;  // Form 1040 line 12f cap (zero before 2026)
+    Decimal charityFloorPercent;         // itemized gifts count only above this % of AGI
+
+    // Features that start in a given year.
+    bool itemizedLimitation;       // 2/37 reduction of itemized deductions in the 37% bracket
+    bool mortgageInsurance;        // mortgage insurance premiums deductible (Schedule A line 8d)
+    bool publicBenefitSchedule;    // Schedule 3-A
+    int formsYear;                 // which year's line numbering to use (2025 or 2026)
 
     // Simplified home office.
     Money homeOfficeRate;

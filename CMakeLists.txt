@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(OpenTax VERSION 0.1.0 LANGUAGES CXX)
+project(OpenTax VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,21 +16,34 @@ else()
     target_compile_options(opentax_warnings INTERFACE -Wall -Wextra -Wpedantic)
 endif()
 
+# ------------------------------------------------------------------ cryptography
+# Monocypher 4.0.3 (vendored unmodified; see SECURITY.md): Argon2id and XChaCha20-Poly1305
+# for password-protected returns.
+add_library(monocypher STATIC third_party/monocypher/monocypher.c)
+target_include_directories(monocypher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher)
+set_target_properties(monocypher PROPERTIES C_STANDARD 99)
+
 # ------------------------------------------------------------------ core engine
 add_library(opentax_core
     src/util.cpp
     src/money.cpp
     src/date.cpp
     src/model.cpp
+    src/rules.cpp
     src/rules_2025.cpp
+    src/rules_2026.cpp
     src/calc.cpp
+    src/crypto.cpp
     src/pdf.cpp
     src/return_pdf.cpp
     src/report.cpp
     src/cli.cpp
 )
 target_include_directories(opentax_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(opentax_core PRIVATE opentax_warnings)
+target_link_libraries(opentax_core PRIVATE opentax_warnings monocypher)
+if(WIN32)
+    target_link_libraries(opentax_core PUBLIC bcrypt)  # BCryptGenRandom
+endif()
 if(MSVC)
     target_compile_options(opentax_core PUBLIC /utf-8 /bigobj)
     target_compile_definitions(opentax_core PUBLIC _CRT_SECURE_NO_WARNINGS)
@@ -56,7 +69,7 @@ install(TARGETS opentax RUNTIME DESTINATION bin)
 if(OPENTAX_BUILD_TESTS)
     enable_testing()
     add_executable(opentax_tests tests/test_main.cpp)
-    target_link_libraries(opentax_tests PRIVATE opentax_core opentax_warnings)
+    target_link_libraries(opentax_tests PRIVATE opentax_core opentax_warnings monocypher)  # monocypher: Argon2 test vector
     target_compile_definitions(opentax_tests PRIVATE OPENTAX_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
     opentax_static_runtime(opentax_tests)
     add_test(NAME opentax_tests COMMAND opentax_tests)

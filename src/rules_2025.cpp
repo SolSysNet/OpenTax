@@ -9,29 +9,11 @@
 //   * 2025 Schedules 1-A, 8812, A (and instructions), SE; Forms 2441, 6251, 8863, 8880,
 //     8959, 8960, 8995.
 
-#include "opentax/rules.hpp"
+#include "rules_detail.hpp"
 
-namespace ot {
-namespace {
+namespace ot::rules_detail {
 
-Money D(long long dollars) { return Money::fromCents(dollars * 100); }
-Decimal P(const char* percent) { return *Decimal::parse(percent); }
-
-// Order: Single, MFJ, MFS, HoH, QSS.
-ByStatus<Money> S(long long single, long long mfj, long long mfs, long long hoh, long long qss) {
-    return {D(single), D(mfj), D(mfs), D(hoh), D(qss)};
-}
-
-std::vector<Bracket> B(std::initializer_list<long long> tops) {
-    static const int rates[] = {10, 12, 22, 24, 32, 35, 37};
-    std::vector<Bracket> out;
-    int i = 0;
-    for (long long top : tops) out.push_back({D(top), rates[i++]});
-    out.push_back({Money(), 37});
-    return out;
-}
-
-Rules make2025() {
+Rules makeRules2025() {
     Rules r{};
     r.year = 2025;
 
@@ -90,6 +72,8 @@ Rules make2025() {
     r.studentLoanPhaseRange = S(15000, 30000, 0, 15000, 15000);
     r.iraLimit = D(7000);
     r.iraCatchUp = D(1000);
+    r.iraPhaseEnd = S(89000, 146000, 10000, 89000, 146000);
+    r.iraPhaseEndSpouseCovered = D(246000);
 
     r.tipsLimit = D(25000);
     r.overtimeLimit = S(12500, 25000, 12500, 12500, 12500);
@@ -107,6 +91,10 @@ Rules make2025() {
     r.careLimitTwo = D(6000);
     r.careBenefitExclusion = D(5000);
     r.careBenefitExclusionMfs = D(2500);
+    r.careTopRate = 35;
+    r.careMidRate = 20;
+    r.careSecondStart = S(0, 0, 0, 0, 0);
+    r.careSecondStep = S(2000, 2000, 2000, 2000, 2000);
 
     // Form 8880 line 9 table. Order: Single, MFJ, MFS, HoH, QSS.
     r.saverTiers = {
@@ -117,25 +105,25 @@ Rules make2025() {
     r.saverContributionLimit = D(2000);
 
     r.qbiThreshold = S(197300, 394600, 197300, 197300, 197300);
+    r.qbiMinimumDeduction = D(0);
+    r.qbiMinimumActive = D(0);
 
     r.amtExemption = S(88100, 137000, 68500, 88100, 137000);
     r.amtPhaseStart = S(626350, 1252700, 626350, 626350, 1252700);
     r.amt28Threshold = S(239100, 239100, 119550, 239100, 239100);
     r.amt28Subtract = S(4782, 4782, 2391, 4782, 4782);
+    r.amtPhasePercent = P("25");
+
+    r.nonItemizerCharity = S(0, 0, 0, 0, 0);
+    r.charityFloorPercent = P("0");
+    r.itemizedLimitation = false;
+    r.mortgageInsurance = false;
+    r.publicBenefitSchedule = false;
+    r.formsYear = 2025;
 
     r.homeOfficeRate = D(5);
     r.homeOfficeMaxSqFt = 300;
     return r;
 }
 
-}  // namespace
-
-bool isSupportedYear(int year) { return year == 2025; }
-
-const Rules& rulesFor(int year) {
-    static const Rules r2025 = make2025();
-    if (year == 2025) return r2025;
-    throw Error("tax year " + std::to_string(year) + " is not supported (this version supports 2025)");
-}
-
-}  // namespace ot
+}  // namespace ot::rules_detail
