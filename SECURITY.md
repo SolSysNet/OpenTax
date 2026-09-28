@@ -21,6 +21,22 @@ OpenTax talks to the network.** Your return stays in one local file that you con
   them to compute your return; write them on the official forms when you file.
 - The return file holds names, birth dates, an address and income figures. Treat it like a paper return.
 
+## Android
+
+- **No permissions.** The manifest requests none, including INTERNET, so the app cannot reach the network.
+- **Storage.** Returns are kept in app-private storage (`files/returns`), which other apps can't read, and are
+  excluded from cloud backup and device-to-device transfer (`allowBackup="false"` and
+  `data_extraction_rules.xml`). Password protection works exactly as on the desktop, with the same file format.
+- **Screen privacy.** Release builds set `FLAG_SECURE`, keeping returns out of screenshots, screen recordings
+  and the recent-apps view. Debuggable development builds leave it off so the UI can be tested.
+- **Exports** go only where you choose through the system file picker. As on the desktop, PDF and CSV exports
+  are not encrypted; an exported return file is encrypted if the return has a password.
+- **Build-time downloads (the one exception).** Android apps are built with Gradle, which downloads the Gradle
+  distribution, the Android Gradle Plugin and the Jetpack libraries. This exception is limited to `android/`;
+  the desktop app, CLI and engine still build without any downloads. Every download is pinned: the Gradle
+  distribution by SHA-256 in `gradle/wrapper/gradle-wrapper.properties`, and every other artifact by SHA-256
+  in `gradle/verification-metadata.xml`, so a changed or tampered artifact fails the build.
+
 ## PDF output
 
 The printable return is rendered by OpenTax's own small PDF writer (`src/pdf.cpp`). It has no third-party code

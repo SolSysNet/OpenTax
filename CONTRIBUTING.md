@@ -43,6 +43,21 @@ ctest --test-dir build --output-on-failure
 
 See the README's *Project layout* section for a map of the code.
 
+### The Android app
+
+Open `android/` in Android Studio, or run `./gradlew assembleDebug` there. You need the NDK and CMake from
+the SDK Manager (the versions are set in `android/app/build.gradle.kts`). The app compiles the engine from
+the repository root, so engine changes need no Android-specific work unless they add a record type or field
+the UI should show specially: forms are generated from the engine's schema through the JNI bridge
+(`android/app/src/main/cpp/bridge.cpp`).
+
+- Keep the app free of permissions. Adding one, especially INTERNET, needs an issue first.
+- Android dependencies are pinned by SHA-256 in `android/gradle/verification-metadata.xml`. When you add or
+  update one, regenerate the file with
+  `./gradlew --write-verification-metadata sha256 assembleDebug assembleRelease lintDebug`, and review the diff
+  so that only the artifacts you meant to change are added.
+- Run `./gradlew lintDebug` before sending a change; it should report no issues.
+
 ## Making a change
 
 1. **Open an issue first** for anything larger than a small fix, so we can agree on the approach before

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A form with a check mark, drawn in the 66dp safe zone of a 108dp adaptive icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,28h24l10,10v40a2,2 0,0 1,-2 2h-32a2,2 0,0 1,-2 -2v-48a2,2 0,0 1,2 -2z" />
+    <path
+        android:fillColor="#C8DCF5"
+        android:pathData="M62,28l10,10h-8a2,2 0,0 1,-2 -2z" />
+    <path
+        android:fillColor="#1E6ED2"
+        android:pathData="M42,44h18v3h-18zM42,51h24v3h-24zM42,58h14v3h-14z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E8C3C"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M52,70l5,5l10,-11" />
+</vector>

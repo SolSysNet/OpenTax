@@ -60,6 +60,25 @@ written, and OpenTax marks them **provisional** on the Review screen when they a
 and EIC Tables use the same midpoint method as every year's tables. Switch a
 return's year on the About you screen, or with `opentax set info year=2026`.
 
+## Android app
+
+The Android app in [android/](android/) runs the same C++ tax engine, compiled with the NDK, under a native
+Jetpack Compose interface: the same interview, refund meter, form entry, review and line-by-line forms, plus
+PDF, CSV and return-file export through the system file picker. Return files move freely between the phone
+and the desktop, encrypted or not.
+
+- **No network access at all.** The app requests no permissions, so Android itself blocks the network.
+- Returns live in app-private storage, excluded from cloud backup and device transfer.
+- Release builds keep the screen out of screenshots and the recent-apps view.
+
+Build it by opening `android/` in Android Studio, or from the command line (Android 9 or later; needs the
+NDK and CMake from the SDK Manager):
+
+```bash
+cd android
+./gradlew assembleDebug
+```
+
 ## What's supported
 
 | Area | Coverage |
@@ -171,6 +190,7 @@ gui/                 desktop app
 tests/               self-contained test suite and IRS table fixtures
 third_party/imgui/   Dear ImGui 1.92.9b (MIT)
 third_party/monocypher/  Monocypher 4.0.3 (BSD-2-Clause or CC0)
+android/             Android app: JNI bridge (app/src/main/cpp) and Compose UI (app/src/main/java)
 ```
 
 The engine (`opentax_core`) doesn't depend on either front end, and `calculate()` is a pure function of the

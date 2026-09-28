@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Only the window background before Compose draws; the app's look comes from Theme.kt. -->
+    <style name="Theme.OpenTax" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+    <color name="background">#F7F8FA</color>
+    <color name="launcher_background">#1E6ED2</color>
+</resources>
