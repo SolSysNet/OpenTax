@@ -1,6 +1,6 @@
 # OpenTax
 
-**Free, open source federal income tax preparation in modern C++.**
+**Free, open source federal income tax preparation, in modern C++.**
 
 OpenTax walks you through your 2025 or 2026 federal return: who you are, your dependents, income, deductions, credits
 and payments. It fills in Form 1040 and every schedule, form and worksheet you need, and shows your refund
